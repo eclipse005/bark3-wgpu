@@ -1,4 +1,4 @@
-//! WGSL compute kernels for the Bark 3.0 Pro wgpu port.
+//! WGSL compute kernels for the Bark 3.0 wgpu port (all family releases).
 //! Generic kernel set adapted from moss-transcribe-diarize-wgpu / qwen3-asr-wgpu
 //! (Apache-2.0): f16-storage / f32-compute, one f16 rounding per output.
 #![allow(dead_code)]
@@ -515,7 +515,7 @@ pub fn softmax(bt: usize) -> String {
     }
     let mut mdecl = String::new();
     for k in 0..r {
-        mdecl.push_str(&format!("    var m{k} = bitcast<f32>(0xFF800000u);\n"));
+        mdecl.push_str(&format!("    var m{k} = -3.4028234e38;\n"));
     }
     let mut sdecl = String::new();
     for k in 0..r {

@@ -1,4 +1,5 @@
-//! Bark 3.0 Pro (Parakeet TDT 0.6B) — wgpu inference port.
+//! Bark 3.0 (Parakeet TDT 0.6B) — wgpu inference port; runs the whole family
+//! (Pro, 3.0, 3.0 Plus, 3.0 Clean).
 //!
 //! [`AsrInference`] is the entry point: load a checkpoint once, then call
 //! [`AsrInference::transcribe`] for each file. The result carries the reference
@@ -14,6 +15,7 @@
 //! - the reference check is byte-exact transcription (see `verify.ps1`)
 
 pub mod bark;
+pub mod browser;
 pub mod clock;
 pub mod cpu;
 pub mod encoder;

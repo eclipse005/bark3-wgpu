@@ -1,5 +1,5 @@
 [package]
-name = "bark3-pro-wgpu"
+name = "bark3-wgpu"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -22,6 +22,12 @@ anyhow = "1"
 constriction = "0.5"
 lzma-rs = "0.3"
 web-time = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console"] }
 
 [profile.release]
 debug = false

@@ -451,6 +451,11 @@ impl Gpu {
             );
         }
         let adapters = adapters_for(&selector).await;
+        crate::browser::log(&format!(
+            "[gpu] selector {selector:?}: {} adapter(s) {}",
+            adapters.len(),
+            list_names(&adapters)
+        ));
         if adapters.is_empty() {
             bail!("no wgpu adapters found (selector {selector:?}); try listing them first");
         }
@@ -507,7 +512,7 @@ impl Gpu {
             let limits = adapter.limits();
             match adapter
                 .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("bark3-pro-wgpu"),
+                    label: Some("bark3-wgpu"),
                     required_features: features
                         & (wgpu::Features::TIMESTAMP_QUERY
                             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
@@ -519,6 +524,10 @@ impl Gpu {
                 .await
             {
                 Ok((device, queue)) => {
+                    crate::browser::log(&format!(
+                        "[gpu] device opened: {} ({:?}, {:?})",
+                        info.name, info.backend, info.device_type
+                    ));
                     opened = Some((info, features, limits, device, queue));
                     break;
                 }
@@ -537,8 +546,10 @@ impl Gpu {
             return Err(skipped.context("request_device")?);
         };
 
+        // The browser has no stderr: route device errors to the console or the
+        // first broken pipeline would fail silently.
         device.on_uncaptured_error(std::sync::Arc::new(|e| {
-            eprintln!("[wgpu uncaptured error] {e}");
+            crate::browser::log(&format!("[wgpu uncaptured error] {e}"));
         }));
 
         Ok(Self {
@@ -607,13 +618,22 @@ impl Gpu {
         self.queue.write_buffer(buf, offset, data);
     }
 
+    /// Wait for everything already submitted.
+    ///
+    /// A browser cannot block on its device, and it does not have to: WebGPU
+    /// submits in queue order, so work added later already sees earlier work.
+    /// On the web this is a no-op, which is also why `create()` there must not
+    /// rely on polling to surface validation errors.
+    pub fn wait(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
     /// Submit an empty command buffer and wait for the queue to drain.  This
     /// retires every deferred `write_buffer` copy and frees their staging.
     pub fn flush(&self) -> Result<()> {
         self.pump()?;
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .context("poll for flush")?;
+        self.wait();
         Ok(())
     }
 
@@ -650,6 +670,56 @@ impl Gpu {
         enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size.max(4));
         self.queue.submit([enc.finish()]);
         self.map_read(&staging, bytes)
+    }
+
+    /// Readback the browser can actually perform.
+    ///
+    /// `map_async` resolves through the JS event loop, so the browser build has
+    /// to await it; a synchronous `readback` would deadlock the page. Native
+    /// builds have nothing to wait for beyond the map itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn readback_async(&self, buf: &wgpu::Buffer, bytes: u64) -> Result<Vec<u8>> {
+        self.readback(buf, bytes)
+    }
+
+    /// Readback the browser can actually perform. See the native version.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn readback_async(&self, buf: &wgpu::Buffer, bytes: u64) -> Result<Vec<u8>> {
+        let size = (bytes + 3) & !3;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: size.max(4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size.max(4));
+        self.queue.submit([enc.finish()]);
+        let slice = staging.slice(..);
+        let promise = js_sys::Promise::new(&mut |resolve, reject| {
+            let (resolve, reject) = (std::rc::Rc::new(resolve), std::rc::Rc::new(reject));
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let done = match r {
+                    Ok(()) => resolve.call0(&wasm_bindgen::JsValue::NULL),
+                    Err(e) => reject.call1(
+                        &wasm_bindgen::JsValue::NULL,
+                        &wasm_bindgen::JsValue::from_str(&format!("{e}")),
+                    ),
+                };
+                if let Err(e) = done {
+                    web_sys::console::log_1(&format!("map_async settle: {e:?}").into());
+                }
+            });
+        });
+        wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|e| anyhow::anyhow!("awaiting map: {e:?}"))?;
+        let mapped = slice.get_mapped_range()?;
+        let mut data = mapped.to_vec();
+        drop(mapped);
+        staging.unmap();
+        data.truncate(bytes as usize);
+        Ok(data)
     }
 
     /// Maps an already-populated `MAP_READ` staging buffer and copies it out.
@@ -710,8 +780,17 @@ impl Gpu {
                 bail!("pipeline {label} failed validation: {e}");
             }
         }
+        // The browser cannot block, so the scope pops on the microtask queue;
+        // without this the first invalid pipeline is invisible in the console.
         #[cfg(target_arch = "wasm32")]
-        let _ = guard;
+        {
+            let label = label.to_string();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Some(e) = guard.pop().await {
+                    crate::browser::log(&format!("[gpu] pipeline {label} failed validation: {e}"));
+                }
+            });
+        }
         Ok(pipe)
     }
 }

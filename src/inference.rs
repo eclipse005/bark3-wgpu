@@ -1,7 +1,7 @@
 //! The library entry point: load once, transcribe many.
 //!
 //! ```no_run
-//! use bark3_pro_wgpu::{AsrInference, Backend, TranscribeOptions};
+//! use bark3_wgpu::{AsrInference, Backend, TranscribeOptions};
 //!
 //! # fn main() -> anyhow::Result<()> {
 //! let asr = AsrInference::load("models/Underdog-Bark-3.0-Pro", Backend::best())?;
@@ -193,12 +193,15 @@ impl AsrInference {
         let model_dir = PathBuf::new();
         let info = src.info().clone();
         info.check_architecture()?;
+        crate::browser::log("[load] source open");
         eprintln!("[model] {}", info.summary());
         let started = crate::clock::now();
 
         let get = |n: &str| src.read(n);
         let tdt = TdtDecoder::from_source(&get)?;
+        crate::browser::log("[load] tdt weights read");
         let sub_w = SubsamplingWeights::from_source(&get)?;
+        crate::browser::log("[load] subsampling weights read");
 
         let gpu = match backend {
             Backend::Cpu => None,
@@ -233,6 +236,7 @@ impl AsrInference {
             started.elapsed().as_secs_f32()
         );
 
+        crate::browser::log("[load] inference assembled");
         Ok(Self {
             gpu,
             tdt,
@@ -250,11 +254,21 @@ impl AsrInference {
         tdt: &TdtDecoder,
         sub_w: &SubsamplingWeights,
     ) -> Result<GpuState> {
-        let gpu = Gpu::new_with(DeviceSelector::Auto).await?;
+        // `BARK3_DEVICE=<selector>` pins the adapter (e.g. `intel`, `dx12:1`,
+        // `vulkan:0`); without it Auto takes the best device it can open. The
+        // browser has no environment, so there it stays Auto.
+        let selector = match std::env::var("BARK3_DEVICE") {
+            Ok(v) => DeviceSelector::parse(&v)?,
+            Err(_) => DeviceSelector::Auto,
+        };
+        let gpu = Gpu::new_with(selector).await?;
         eprintln!("[gpu] {}", gpu.describe());
         let enc = Encoder::load_with(gpu, src)?;
+        crate::browser::log("[load] encoder built");
         let decode = GpuTdtDecoder::new(&enc.gpu, tdt)?;
+        crate::browser::log("[load] tdt decoder built");
         let sub = SubGpu::new(&enc.gpu, sub_w)?;
+        crate::browser::log("[load] subsampling built");
         Ok(GpuState { enc, decode, sub })
     }
 
@@ -280,12 +294,50 @@ impl AsrInference {
     ///
     /// This is what the browser build feeds: one call per recording, after the
     /// VAD has decided where the silences are.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn transcribe_chunked(
         &self,
         samples: &[f32],
         cuts: &[f32],
         options: TranscribeOptions,
     ) -> Result<TranscribeResult> {
+        let Some(spans) = self.chunk_spans(samples, cuts) else {
+            return self.transcribe_samples(samples, options);
+        };
+        let mut acc = ChunkAcc::new(samples.len());
+        for span in spans {
+            let chunk = self.transcribe_samples(&samples[span.a..span.b], options)?;
+            acc.add(chunk, &span);
+        }
+        Ok(acc.finish(options))
+    }
+
+    /// The browser's form of [`Self::transcribe_chunked`]: each chunk comes back
+    /// through a buffer map, so the loop has to be awaited.
+    pub async fn transcribe_chunked_async(
+        &self,
+        samples: &[f32],
+        cuts: &[f32],
+        options: TranscribeOptions,
+    ) -> Result<TranscribeResult> {
+        let Some(spans) = self.chunk_spans(samples, cuts) else {
+            return self.transcribe_samples_async(samples, options).await;
+        };
+        let mut acc = ChunkAcc::new(samples.len());
+        for span in spans {
+            let chunk = self
+                .transcribe_samples_async(&samples[span.a..span.b], options)
+                .await?;
+            acc.add(chunk, &span);
+        }
+        Ok(acc.finish(options))
+    }
+
+    /// Cut the recording into the spans that get decoded one at a time.
+    ///
+    /// `None` means "no usable cut": the caller should decode the recording in
+    /// one pass instead.
+    fn chunk_spans(&self, samples: &[f32], cuts: &[f32]) -> Option<Vec<Span>> {
         /// Context on each side of a cut, so boundary words decode in full.
         const PAD: f32 = 0.20;
         let duration = samples.len() as f32 / SAMPLE_RATE as f32;
@@ -297,9 +349,8 @@ impl AsrInference {
         edges.sort_by(f32::total_cmp);
         edges.dedup();
         if edges.is_empty() {
-            return self.transcribe_samples(samples, options);
+            return None;
         }
-
         let mut bounds = Vec::with_capacity(edges.len() + 1);
         let mut start = 0.0f32;
         for edge in edges {
@@ -307,11 +358,7 @@ impl AsrInference {
             start = edge;
         }
         bounds.push((start, duration));
-
-        let frame_of = |seconds: f32| (seconds / crate::transcript::FRAME_SECONDS).round() as u32;
-        let mut words = Vec::new();
-        let mut tokens = Vec::new();
-        let mut texts = Vec::new();
+        let mut spans = Vec::with_capacity(bounds.len());
         for (from, to) in bounds {
             let lo = (from - PAD).max(0.0);
             let hi = (to + PAD).min(duration);
@@ -320,34 +367,9 @@ impl AsrInference {
             if b <= a {
                 continue;
             }
-            let chunk = self.transcribe_samples(&samples[a..b], options)?;
-            if !chunk.text.is_empty() {
-                texts.push(chunk.text);
-            }
-            let frame_base = frame_of(lo);
-            for token in chunk.tokens {
-                let frame = token.frame + frame_base;
-                if frame >= frame_of(from) && frame < frame_of(to) {
-                    tokens.push(crate::tdt::Token { frame, ..token });
-                }
-            }
-            for mut word in chunk.words {
-                word.start += lo;
-                word.end = (word.end + lo).min(duration);
-                let middle = 0.5 * (word.start + word.end);
-                if middle >= from && middle < to {
-                    words.push(word);
-                }
-            }
+            spans.push(Span { from, to, lo, a, b });
         }
-        words.sort_by(|a, b| a.start.total_cmp(&b.start));
-        Ok(TranscribeResult {
-            text: texts.join(" "),
-            segments: crate::segment::words_to_segments(&words, duration, &options.segments),
-            words,
-            tokens,
-            duration,
-        })
+        Some(spans)
     }
 
     /// Build the CPU encoder in addition to whatever is already loaded, so the
@@ -394,6 +416,7 @@ impl AsrInference {
     }
 
     /// Transcribe a 16 kHz mono WAV file.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn transcribe(
         &self,
         path: impl AsRef<Path>,
@@ -406,12 +429,23 @@ impl AsrInference {
     }
 
     /// Transcribe in-memory 16 kHz mono samples.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn transcribe_samples(
         &self,
         samples: &[f32],
         options: TranscribeOptions,
     ) -> Result<TranscribeResult> {
         crate::transcription::run(self, samples, None, &options)
+    }
+
+    /// The browser's form: readbacks resolve on the JS event loop, so the whole
+    /// transcription has to be awaited.
+    pub async fn transcribe_samples_async(
+        &self,
+        samples: &[f32],
+        options: TranscribeOptions,
+    ) -> Result<TranscribeResult> {
+        crate::transcription::run_async(self, samples, None, &options).await
     }
 }
 
@@ -421,4 +455,72 @@ fn mel_filters() -> Vec<f32> {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+/// One chunk of the VAD-driven split: `[a, b)` of the sample buffer, decoded with
+/// `lo` seconds of lead-in context and owned from `from` to `to`.
+struct Span {
+    from: f32,
+    to: f32,
+    lo: f32,
+    a: usize,
+    b: usize,
+}
+
+/// Accumulates per-chunk results into one recording timeline.
+struct ChunkAcc {
+    words: Vec<crate::transcript::Word>,
+    tokens: Vec<crate::tdt::Token>,
+    texts: Vec<String>,
+    duration: f32,
+}
+
+impl ChunkAcc {
+    fn new(sample_count: usize) -> Self {
+        Self {
+            words: Vec::new(),
+            tokens: Vec::new(),
+            texts: Vec::new(),
+            duration: sample_count as f32 / SAMPLE_RATE as f32,
+        }
+    }
+
+    /// Keep the words and tokens this chunk owns: a word belongs to whichever
+    /// span contains its midpoint, so a word straddling a cut appears once.
+    fn add(&mut self, chunk: TranscribeResult, span: &Span) {
+        let frame_of = |seconds: f32| (seconds / crate::transcript::FRAME_SECONDS).round() as u32;
+        if !chunk.text.is_empty() {
+            self.texts.push(chunk.text);
+        }
+        let frame_base = frame_of(span.lo);
+        for token in chunk.tokens {
+            let frame = token.frame + frame_base;
+            if frame >= frame_of(span.from) && frame < frame_of(span.to) {
+                self.tokens.push(crate::tdt::Token { frame, ..token });
+            }
+        }
+        for mut word in chunk.words {
+            word.start += span.lo;
+            word.end = (word.end + span.lo).min(self.duration);
+            let middle = 0.5 * (word.start + word.end);
+            if middle >= span.from && middle < span.to {
+                self.words.push(word);
+            }
+        }
+    }
+
+    fn finish(mut self, options: TranscribeOptions) -> TranscribeResult {
+        self.words.sort_by(|a, b| a.start.total_cmp(&b.start));
+        TranscribeResult {
+            text: self.texts.join(" "),
+            segments: crate::segment::words_to_segments(
+                &self.words,
+                self.duration,
+                &options.segments,
+            ),
+            words: self.words,
+            tokens: self.tokens,
+            duration: self.duration,
+        }
+    }
 }

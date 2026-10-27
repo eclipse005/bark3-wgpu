@@ -1,5 +1,10 @@
 // GPU TDT greedy decoder.
 //
+// No subgroup builtins: Chrome exposes them only behind the `subgroups` WGSL
+// extension, which wgpu's web backend cannot request, so the horizontal sums and
+// the joint-head exchange go through workgroup memory. Same add order, same
+// result, one source for every backend.
+//
 // Per step the host records four dispatches:
 //   joint  (65 WGs) : score every joint row, per-WG argmax
 //   layer0 (40 WGs) : reduce partials + control, then LSTM layer 0
@@ -95,6 +100,25 @@ var<workgroup> red_dur_id: array<u32, 256>;
 var<workgroup> x_stage: array<f32, 2u * DH>;
 var<workgroup> layer_gates: array<f32, LAYER_ROWS>;
 var<workgroup> chosen: array<u32, 2>;
+// Per-lane staging for the horizontal sums, plus the joint head's cross-row
+// exchange: a lane swaps with lane ^ 16, its partner in the 32-lane pair.
+var<workgroup> lane_stage: array<f32, WG>;
+var<workgroup> exch_score: array<f32, WG>;
+var<workgroup> exch_id: array<u32, WG>;
+var<workgroup> exch_dur_score: array<f32, WG>;
+var<workgroup> exch_dur_id: array<u32, WG>;
+
+// Tint refuses a barrier that sits in control flow derived from a storage-buffer
+// read, and every predicate below is one. Passing the value through workgroup
+// memory with \`workgroupUniformLoad\` makes it uniform by construction, so the
+// kernels keep their early returns and their barriers.
+var<workgroup> wg_flag: u32;
+
+fn sync_flag(v: u32) -> bool {
+    wg_flag = v;
+    workgroupBarrier();
+    return workgroupUniformLoad(&wg_flag) != 0u;
+}
 
 // Lane `j`'s K values live at `row4 + j * LANE4`, eight halves per vec4, in
 // increasing K residue order.
@@ -124,26 +148,27 @@ fn sigmoid(x: f32) -> f32 {
     return 1.0 / (1.0 + exp(-x));
 }
 
-// A 32-lane subgroup contains two independent 16-lane rows. Lane j holds the
-// partial for K residue j. Combine j with j+8, then sum j=0..7 strictly left to
-// right, matching the CPU horizontal reduction.
-fn sum_row(partial: f32, subgroup_lane: u32) -> f32 {
-    let base = subgroup_lane & 16u;
-    let column = subgroup_lane & 15u;
-    let paired = partial + subgroupShuffle(partial, base + ((column + 8u) & 15u));
+// One 16-lane row group holds one K residue per lane. Combine lane j with j+8,
+// then add the eight pairs strictly left to right: the CPU horizontal reduction,
+// unchanged by the move to workgroup memory.
+fn sum_row(partial: f32, tid: u32, group: u32) -> f32 {
+    lane_stage[tid] = partial;
+    workgroupBarrier();
+    let base = group * LANES;
     var sum = 0.0;
     for (var j = 0u; j < 8u; j = j + 1u) {
-        sum = sum + subgroupShuffle(paired, base + j);
+        sum = sum + (lane_stage[base + j] + lane_stage[base + j + 8u]);
     }
+    workgroupBarrier();
     return sum;
 }
 
 // Cross-workgroup argmax: stage the 129 partials and collapse them in place.
 // Equal scores keep the lower id, so the whole sequence is order independent.
 fn reduce_joint(tid: u32) {
-    var token_score = bitcast<f32>(0xff800000u);
+    var token_score = -3.4028234e38;
     var token_id = 0xffffffffu;
-    var duration_score = bitcast<f32>(0xff800000u);
+    var duration_score = -3.4028234e38;
     var duration_id = 0xffffffffu;
     if (tid < JOINT_GROUPS) {
         token_score = Partials[tid].token_score;
@@ -198,7 +223,6 @@ fn run_layer(
     tid: u32,
     group: u32,
     lane: u32,
-    subgroup_lane: u32,
 ) {
     let w_layer = layer * GS * DH / 8u;
     let b_layer = layer * GS;
@@ -211,8 +235,8 @@ fn run_layer(
         let row4 = (gate * DH + channel) * ROW4;
         let dot_x = dot_row(0u, W_IH + w_layer + row4, lane);
         let dot_h = dot_row(DH, W_HH + w_layer + row4, lane);
-        let sum_x = sum_row(dot_x, subgroup_lane);
-        let sum_h = sum_row(dot_h, subgroup_lane);
+        let sum_x = sum_row(dot_x, tid, group);
+        let sum_h = sum_row(dot_h, tid, group);
         if (lane == 0u && valid_local) {
             let row = gate * DH + channel;
             layer_gates[local] = ((Biases[B_IH + b_layer + row] + Biases[B_HH + b_layer + row])
@@ -238,71 +262,71 @@ fn run_layer(
 fn joint_main(
     @builtin(workgroup_id) wgid: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(subgroup_invocation_id) subgroup_lane: u32,
 ) {
     let tid = lid.x;
     let group = tid / LANES;
     let lane = tid % LANES;
     let frame = Result[R_FRAME];
-    if (frame >= params.t_len || Result[R_EXIT] != 0u) {
-        if (tid == 0u) {
-            Partials[wgid.x] = Partial(
-                bitcast<f32>(0xff800000u),
-                0xffffffffu,
-                bitcast<f32>(0xff800000u),
-                0xffffffffu,
-            );
-        }
-        return;
-    }
+    // A finished decoder leaves the workgroup idle instead of returning early:
+    // every invocation has to reach the barriers below. Skipping the scoring
+    // leaves the sentinels in place, which is the partial a finished step has to
+    // publish anyway.
+    let idle = sync_flag(select(0u, 1u, frame >= params.t_len || Result[R_EXIT] != 0u));
 
-    for (var c = tid; c < DH; c = c + WG) {
-        x_stage[c] = max(Pooler[frame * DH + c] + State[S_DEC + c], 0.0);
-    }
-    workgroupBarrier();
-
-    var best_token_score = bitcast<f32>(0xff800000u);
+    var best_token_score = -3.4028234e38;
     var best_token_id = 0xffffffffu;
-    var best_duration_score = bitcast<f32>(0xff800000u);
+    var best_duration_score = -3.4028234e38;
     var best_duration_id = 0xffffffffu;
 
-    for (var tile = 0u; tile < JOINT_TILES; tile = tile + 1u) {
-        let row = wgid.x * ROWS_PER_WG + tile * ROW_GROUPS + group;
-        var partial = 0.0;
-        if (row < N_ROWS) {
-            partial = dot_row(0u, W_HEAD + row * ROW4, lane);
+    if (!idle) {
+        for (var c = tid; c < DH; c = c + WG) {
+            x_stage[c] = max(Pooler[frame * DH + c] + State[S_DEC + c], 0.0);
         }
-        let sum = sum_row(partial, subgroup_lane);
-        if (lane == 0u && row < N_ROWS) {
-            let score = Biases[B_HEAD + row] + sum;
-            if (row < VOCAB) {
-                if (score > best_token_score) {
-                    best_token_score = score;
-                    best_token_id = row;
+        workgroupBarrier();
+
+        for (var tile = 0u; tile < JOINT_TILES; tile = tile + 1u) {
+            let row = wgid.x * ROWS_PER_WG + tile * ROW_GROUPS + group;
+            var partial = 0.0;
+            if (row < N_ROWS) {
+                partial = dot_row(0u, W_HEAD + row * ROW4, lane);
+            }
+            let sum = sum_row(partial, tid, group);
+            if (lane == 0u && row < N_ROWS) {
+                let score = Biases[B_HEAD + row] + sum;
+                if (row < VOCAB) {
+                    if (score > best_token_score) {
+                        best_token_score = score;
+                        best_token_id = row;
+                    }
+                } else if (score > best_duration_score) {
+                    best_duration_score = score;
+                    best_duration_id = row;
                 }
-            } else if (score > best_duration_score) {
-                best_duration_score = score;
-                best_duration_id = row;
             }
         }
-    }
 
-    // The two rows sharing this subgroup collapse into one candidate; every
-    // lane ends up holding that pair's winner.
-    let partner = (subgroup_lane & 16u) ^ 16u;
-    let other_score = subgroupShuffle(best_token_score, partner);
-    let other_id = subgroupShuffle(best_token_id, partner);
-    if (other_score > best_token_score
-        || (other_score == best_token_score && other_id < best_token_id)) {
-        best_token_score = other_score;
-        best_token_id = other_id;
-    }
-    let other_duration = subgroupShuffle(best_duration_score, partner);
-    let other_duration_id = subgroupShuffle(best_duration_id, partner);
-    if (other_duration > best_duration_score
-        || (other_duration == best_duration_score && other_duration_id < best_duration_id)) {
-        best_duration_score = other_duration;
-        best_duration_id = other_duration_id;
+        // The two rows sharing this 32-lane pair collapse into one candidate;
+        // every lane ends up holding that pair's winner.
+        exch_score[tid] = best_token_score;
+        exch_id[tid] = best_token_id;
+        exch_dur_score[tid] = best_duration_score;
+        exch_dur_id[tid] = best_duration_id;
+        workgroupBarrier();
+        let partner = tid ^ 16u;
+        let other_score = exch_score[partner];
+        let other_id = exch_id[partner];
+        if (other_score > best_token_score
+            || (other_score == best_token_score && other_id < best_token_id)) {
+            best_token_score = other_score;
+            best_token_id = other_id;
+        }
+        let other_duration = exch_dur_score[partner];
+        let other_duration_id = exch_dur_id[partner];
+        if (other_duration > best_duration_score
+            || (other_duration == best_duration_score && other_duration_id < best_duration_id)) {
+            best_duration_score = other_duration;
+            best_duration_id = other_duration_id;
+        }
     }
 
     if (lane == 0u) {
@@ -337,12 +361,11 @@ fn joint_main(
 fn layer0_main(
     @builtin(workgroup_id) wgid: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(subgroup_invocation_id) subgroup_lane: u32,
 ) {
     let tid = lid.x;
     let group = tid / LANES;
     let lane = tid % LANES;
-    if (Result[R_EXIT] != 0u) {
+    if (sync_flag(select(0u, 1u, Result[R_EXIT] != 0u))) {
         return;
     }
 
@@ -353,7 +376,7 @@ fn layer0_main(
     let steps = Result[R_STEPS];
     let count = Result[R_COUNT];
 
-    if (token == BLANK) {
+    if (sync_flag(select(0u, 1u, token == BLANK))) {
         let new_frame = frame + max(duration, 1u);
         let new_steps = steps + 1u;
         if (wgid.x == 0u && tid == 0u) {
@@ -411,7 +434,6 @@ fn layer0_main(
         tid,
         group,
         lane,
-        subgroup_lane,
     );
 }
 
@@ -419,9 +441,8 @@ fn layer0_main(
 fn layer1_main(
     @builtin(workgroup_id) wgid: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(subgroup_invocation_id) subgroup_lane: u32,
 ) {
-    if (Result[R_ACTIVE] == 0u || Result[R_EXIT] != 0u) {
+    if (sync_flag(select(0u, 1u, Result[R_ACTIVE] == 0u || Result[R_EXIT] != 0u))) {
         return;
     }
     let tid = lid.x;
@@ -446,7 +467,6 @@ fn layer1_main(
         tid,
         group,
         lane,
-        subgroup_lane,
     );
 }
 
@@ -454,9 +474,8 @@ fn layer1_main(
 fn project_main(
     @builtin(workgroup_id) wgid: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(subgroup_invocation_id) subgroup_lane: u32,
 ) {
-    if (Result[R_ACTIVE] == 0u || Result[R_EXIT] != 0u) {
+    if (sync_flag(select(0u, 1u, Result[R_ACTIVE] == 0u || Result[R_EXIT] != 0u))) {
         return;
     }
     let tid = lid.x;
@@ -475,7 +494,7 @@ fn project_main(
         let valid = channel < DH;
         let safe_channel = min(channel, DH - 1u);
         let partial = dot_row(0u, W_PROJ + safe_channel * ROW4, lane);
-        let sum = sum_row(partial, subgroup_lane);
+        let sum = sum_row(partial, tid, group);
         if (lane == 0u && valid) {
             State[S_DEC + channel] = Biases[B_PROJ + channel] + sum;
         }

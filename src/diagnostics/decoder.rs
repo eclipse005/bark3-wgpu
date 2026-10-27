@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
-use bark3_pro_wgpu::cfg;
-use bark3_pro_wgpu::tdt::TdtDecoder;
-use bark3_pro_wgpu::transcript::tokens_to_text;
+use bark3_wgpu::cfg;
+use bark3_wgpu::tdt::TdtDecoder;
+use bark3_wgpu::transcript::tokens_to_text;
 
 use super::read_f32;
-use bark3_pro_wgpu::AsrInference;
-use bark3_pro_wgpu::transcript::vocab;
+use bark3_wgpu::AsrInference;
+use bark3_wgpu::transcript::vocab;
 
 pub fn lstm_check(tdt: &TdtDecoder) -> Result<()> {
     // Feed blank embeddings followed by one real token; print checksums per step.
@@ -137,11 +137,11 @@ pub fn gpu_pool_decode_test(asr: &AsrInference, golden: &std::path::Path) -> Res
     let pool = gpu.storage("torch_pooler", pool_host.len() as u64 * 4);
     gpu.upload(&pool, bytemuck::cast_slice(&pool_host));
 
-    let started = bark3_pro_wgpu::clock::now();
+    let started = bark3_wgpu::clock::now();
     let decoded = asr.gpu()?.decode.decode(gpu, &pool, t_len)?;
     let gpu_time = started.elapsed().as_secs_f32();
 
-    let started = bark3_pro_wgpu::clock::now();
+    let started = bark3_wgpu::clock::now();
     let cpu_tokens = asr.tdt.decode(&pool_host, t_len);
     let cpu_time = started.elapsed().as_secs_f32();
 

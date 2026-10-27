@@ -1,9 +1,9 @@
 use anyhow::Result;
-use bark3_pro_wgpu::encoder::{Encoder, Weight};
-use bark3_pro_wgpu::raw::RawTensor;
+use bark3_wgpu::encoder::{Encoder, Weight};
+use bark3_wgpu::raw::RawTensor;
 
 pub fn gemm_mix_z8_test(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let g = &enc.gpu;
     let tp = pad128(191);
     let (m, n, k, z) = (tp as usize, 128usize, tp as usize, 8usize);
@@ -73,7 +73,7 @@ pub fn gemm_mix_z8_test(enc: &Encoder) -> Result<()> {
 }
 
 pub fn gemm_mix_tb_test(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let g = &enc.gpu;
     let tp = pad128(191);
     let (m, n, k) = (tp as usize, 128usize, tp as usize);
@@ -164,7 +164,7 @@ pub fn gemm_mix_tb_test(enc: &Encoder) -> Result<()> {
 }
 
 pub fn gemm_mix_test(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let g = &enc.gpu;
     let tp = pad128(191);
     let (m, n, k) = (tp as usize, 1152usize, 128usize);
@@ -286,7 +286,7 @@ pub fn gemm_mix_test(enc: &Encoder) -> Result<()> {
 }
 
 pub fn gemm_bench(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::Ctx;
+    use bark3_wgpu::encoder::Ctx;
     let g = &enc.gpu;
     let reps: usize = std::env::var("GB_REPS")
         .ok()
@@ -405,7 +405,7 @@ pub fn gemm_bench(enc: &Encoder) -> Result<()> {
                 }
             }
         }
-        let started = bark3_pro_wgpu::clock::now();
+        let started = bark3_wgpu::clock::now();
         g.queue.submit([e2.finish()]);
         g.device.poll(wgpu::PollType::wait_indefinitely())?;
         let elapsed = started.elapsed().as_secs_f64();
@@ -424,7 +424,7 @@ pub fn gemm_bench(enc: &Encoder) -> Result<()> {
 }
 
 pub fn gemm_test(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let g = &enc.gpu;
     let tp = pad128(191);
     let burn: usize = std::env::var("GEMM_BURN")
@@ -536,7 +536,7 @@ fn read_real_weights(enc: &Encoder, n: usize, k: usize) -> Result<Vec<f32>> {
 /// Low-bit (`A*W` with 4-bit codes + levels) against the f16 kernel on the same
 /// values: the dequant must produce bit-identical f32 results.
 pub fn lowbit_vs_f16_test(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, LowBit};
+    use bark3_wgpu::encoder::{Ctx, LowBit};
 
     let g = &enc.gpu;
     let (m, n, k) = (64usize, 128usize, 1024usize);
@@ -572,7 +572,7 @@ pub fn lowbit_vs_f16_test(enc: &Encoder) -> Result<()> {
     let mut lev_words = vec![0u32; n * 2];
     for row in 0..n {
         for (i, l) in levels[row].iter().enumerate() {
-            let h = bark3_pro_wgpu::raw::f32_to_f16_bits(*l) as u32;
+            let h = bark3_wgpu::raw::f32_to_f16_bits(*l) as u32;
             lev_words[row * 2 + i / 2] |= h << (16 * (i % 2));
         }
     }

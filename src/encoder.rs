@@ -410,7 +410,10 @@ impl Encoder {
     /// `model.safetensors`, or the `model.bark` container whose encoder linears
     /// stay 4-bit. `src.prefetch()` decodes the container in parallel first.
     pub fn load_with(gpu: Gpu, src: &dyn WeightSource) -> Result<Self> {
+        let _stage = crate::browser::stage("enc");
+        crate::browser::log("[enc] prefetch");
         src.prefetch()?;
+        crate::browser::log("[enc] prefetched");
         // A read failure here means the checkpoint is truncated; the previous
         // map-based loader panicked on a missing tensor for the same reason.
         let t = |n: &str| src.read(n).unwrap_or_else(|e| panic!("tensor {n}: {e}"));
@@ -648,6 +651,7 @@ impl Encoder {
          -> Result<wgpu::ComputePipeline> {
             gpu.pipeline(label, src, entry, Some(ly))
         };
+        crate::browser::log("[enc] pipelines");
         let gemm = pipe(
             "gemm",
             &shaders::prefill_gemm(false, false, false, false, false),
@@ -757,6 +761,7 @@ impl Encoder {
         let bn_silu = pipe("bn_silu", P_BN_SILU, "main", &layout(&u4_bgl))?;
 
         let gemm_av_bgl = gemm_bgl.clone();
+        crate::browser::log("[enc] struct ready");
         Ok(Self {
             w: EncoderWeights {
                 sub_w,
@@ -2073,7 +2078,7 @@ impl Encoder {
         }
         if std::env::var("BARK3_STAGE").as_deref() == Ok("sublin") {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             let bytes = g.readback(&h, t_real as u64 * 1024 * 4)?;
             let out: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
             return Ok(EncodeOut {
@@ -2085,7 +2090,15 @@ impl Encoder {
 
         let mut h_cur = h.clone();
         let mut h_alt = h2.clone();
+        crate::browser::log(&format!("[enc] forward tp={tp} te={te} pp={pp}"));
+        let lstart = crate::clock::now();
         for l in 0..cfg::LAYERS {
+            if l % 2 == 0 {
+                crate::browser::log(&format!(
+                    "[enc] layer {l} at {:.1}s",
+                    lstart.elapsed().as_secs_f64()
+                ));
+            }
             let lw = &self.w.layers[l];
             let w512 = tp * 512; // words per (T,1024)
             {
@@ -2585,7 +2598,7 @@ impl Encoder {
             if layers_in_chunk >= 3 || need_dump {
                 g.queue.submit([enc.finish()]);
                 if need_dump {
-                    g.device.poll(wgpu::PollType::wait_indefinitely())?;
+                    g.wait();
                     let bytes = g.readback(&h_cur, t_real as u64 * 1024 * 4)?;
                     let out: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                     block_dump = Some(out);
@@ -2623,11 +2636,11 @@ impl Encoder {
             let mut resolve = g.device.create_command_encoder(&Default::default());
             prof.resolve(&mut resolve);
             g.queue.submit([resolve.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             prof.report(g)?;
             prof.reset();
         } else {
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
         }
         let out: Vec<f32> = if read_pooler {
             let bytes = g.readback(&pooler, t_real as u64 * 640 * 4)?;

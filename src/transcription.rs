@@ -6,7 +6,19 @@ use crate::sub::subsample;
 use crate::transcript::{TranscribeResult, vocab};
 
 /// Run the production transcription pipeline without any diagnostic command logic.
+/// Synchronous entry point (native): the browser awaits [`run_async`] because
+/// its readbacks resolve on the JS event loop.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run(
+    asr: &AsrInference,
+    wave: &[f32],
+    dump_layer: Option<usize>,
+    options: &TranscribeOptions,
+) -> Result<TranscribeResult> {
+    pollster::block_on(run_async(asr, wave, dump_layer, options))
+}
+
+pub(crate) async fn run_async(
     asr: &AsrInference,
     wave: &[f32],
     dump_layer: Option<usize>,
@@ -39,9 +51,11 @@ pub(crate) fn run(
     padded.append(&mut wave);
     let wave = &padded;
 
+    crate::browser::log("[tx] mel");
     let t0 = crate::clock::now();
     let feats = mel_fe.compute(wave);
     let t_mel = t0.elapsed().as_secs_f32();
+    crate::browser::log(&format!("[tx] mel done in {t_mel:.1}s"));
 
     let t1 = crate::clock::now();
     let dump_layer_env: Option<usize> = std::env::var("BARK3_DUMP_L")
@@ -189,7 +203,10 @@ pub(crate) fn run(
             .pooler_buf
             .as_ref()
             .context("GPU decoder requested but pooler buffer is missing")?;
-        let decoded = gpu.decode.decode(&gpu.enc.gpu, pooler, t_real)?;
+        let decoded = gpu
+            .decode
+            .decode_async(&gpu.enc.gpu, pooler, t_real)
+            .await?;
         if std::env::var("BARK3_GPUDEC_STATS").is_ok() {
             eprintln!(
                 "[gpu-dec] steps={} frame={} chunks={} exit={} record={:.1}ms wait={:.1}ms total={:.1}ms",

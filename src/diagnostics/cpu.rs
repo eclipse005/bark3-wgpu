@@ -2,19 +2,19 @@
 //! and an end-to-end transcript gate on the golden fixture.
 
 use anyhow::{Context, Result};
-use bark3_pro_wgpu::AsrInference;
-use bark3_pro_wgpu::sub::subsample;
-use bark3_pro_wgpu::transcript::tokens_to_text;
+use bark3_wgpu::AsrInference;
+use bark3_wgpu::sub::subsample;
+use bark3_wgpu::transcript::tokens_to_text;
 
 use super::{diff_report, read_f32};
-use bark3_pro_wgpu::transcript::vocab;
+use bark3_wgpu::transcript::vocab;
 
 /// Compare the two backends on an arbitrary wav, stage by stage.
 ///
 /// The golden fixture only covers one utterance length; this reaches the shapes
 /// the mini-set exercises, where a length-dependent bug would hide.
 pub fn cpu_wav_diff(asr: &AsrInference, wav: &std::path::Path) -> Result<()> {
-    let wave = bark3_pro_wgpu::mel::read_wav(wav)?;
+    let wave = bark3_wgpu::mel::read_wav(wav)?;
     let mut padded = vec![0f32; 4000];
     padded.extend_from_slice(&wave);
     let feats = asr.mel_fe.compute(&padded);
@@ -64,7 +64,7 @@ pub fn cpu_encoder_test(asr: &AsrInference, golden: &std::path::Path) -> Result<
     diff_report("h_l0(cpu vs gpu)", &h1[..t * 1024], gpu_block);
 
     // Full stack.
-    let started = bark3_pro_wgpu::clock::now();
+    let started = bark3_wgpu::clock::now();
     let pooler = cpu.encode(&sub_rows, t, 24);
     let seconds = started.elapsed().as_secs_f64();
     println!(

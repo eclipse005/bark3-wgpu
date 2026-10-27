@@ -139,7 +139,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let row = wgid.x;
     if (row >= cfg.rows) { return; }
     let basew = row * (cfg.stride / 2u);   // WORD base of this row
-    var m = bitcast<f32>(0xFF800000u);
+    // The most negative f32, written as a decimal that Tint accepts: it rejects
+    // any literal above f32::MAX instead of rounding it (3.4028235e38 lands on
+    // the same f32 but is refused), and it folds bitcast<f32>(0xFF800000u) into
+    // an -inf constant, which WGSL cannot spell. Indistinguishable from -inf for
+    // a max accumulator over finite input.
+    var m = -3.4028234e38;
     for (var j = lid.x; j < cfg.n; j = j + 256u) {
         let v = half_at(unpack2x16float(X[basew + (j >> 1u)]), j);
         if (v > m) { m = v; }
@@ -492,7 +497,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     }
     workgroupBarrier();
 
-    var m = bitcast<f32>(0xFF800000u);
+    // The most negative f32, written as a decimal that Tint accepts: it rejects
+    // any literal above f32::MAX instead of rounding it (3.4028235e38 lands on
+    // the same f32 but is refused), and it folds bitcast<f32>(0xFF800000u) into
+    // an -inf constant, which WGSL cannot spell. Indistinguishable from -inf for
+    // a max accumulator over finite input.
+    var m = -3.4028234e38;
     for (var j = lid.x; j < cfg.t_real; j = j + 256u) {
         if (cache[j] > m) { m = cache[j]; }
     }
@@ -542,7 +552,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let row = wgid.x;
     if (row >= cfg.rows) { return; }
     let base = row * cfg.stride;
-    var m = bitcast<f32>(0xFF800000u);
+    // The most negative f32, written as a decimal that Tint accepts: it rejects
+    // any literal above f32::MAX instead of rounding it (3.4028235e38 lands on
+    // the same f32 but is refused), and it folds bitcast<f32>(0xFF800000u) into
+    // an -inf constant, which WGSL cannot spell. Indistinguishable from -inf for
+    // a max accumulator over finite input.
+    var m = -3.4028234e38;
     for (var j = lid.x; j < cfg.n; j = j + 256u) {
         if (X[base + j] > m) { m = X[base + j]; }
     }

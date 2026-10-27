@@ -609,7 +609,7 @@ impl SubGpu {
         if prof {
             let e0 = g.device.create_command_encoder(&Default::default());
             g.queue.submit([e0.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!(
                 "[subg] empty-submit after alloc {:.3}s",
                 ta.elapsed().as_secs_f32()
@@ -623,13 +623,13 @@ impl SubGpu {
         self.im2col_dispatch(g, &mut enc, &mel_b, &patch, f, f1, m1, p_conv);
         if prof {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] im2col#1 {:.3}s", t0.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
             let t9 = crate::clock::now();
             self.im2col_dispatch(g, &mut enc, &mel_b, &patch, f, f1, m1, p_conv);
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] im2col#2 {:.3}s", t9.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
@@ -650,7 +650,7 @@ impl SubGpu {
         let t_conv1 = tc.elapsed();
         if prof {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] conv1_pw {:.3}s", t_conv1.as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
@@ -661,7 +661,7 @@ impl SubGpu {
         );
         if prof {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] dw1 {:.3}s", t1s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
@@ -680,7 +680,7 @@ impl SubGpu {
         );
         if prof {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] pw1 {:.3}s", t2s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
@@ -690,7 +690,7 @@ impl SubGpu {
         );
         if prof {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] dw2 {:.3}s", t3s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
@@ -709,7 +709,7 @@ impl SubGpu {
         );
         if prof {
             g.queue.submit([enc.finish()]);
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!("[subg] pw2 {:.3}s", t4s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
@@ -761,7 +761,7 @@ impl SubGpu {
             Self::dump_stage(g, "out", &out, (tp * 4096 * 4) as u64);
         }
         if prof {
-            g.device.poll(wgpu::PollType::wait_indefinitely())?;
+            g.wait();
             eprintln!(
                 "[subg] kernels {:.3}s alloc {:.3}s record {:.3}s (conv1 build {:.3}s) x1={}MB",
                 t0.elapsed().as_secs_f32(),

@@ -190,7 +190,20 @@ impl GpuTdtDecoder {
         })
     }
 
+    /// Synchronous entry point: native only. The browser awaits
+    /// [`Self::decode_async`], because every result chunk comes back through a
+    /// buffer map, which resolves on the JS event loop.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn decode(
+        &self,
+        gpu: &Gpu,
+        pooler: &wgpu::Buffer,
+        t_len: usize,
+    ) -> Result<GpuDecodeOutput> {
+        pollster::block_on(self.decode_async(gpu, pooler, t_len))
+    }
+
+    pub async fn decode_async(
         &self,
         gpu: &Gpu,
         pooler: &wgpu::Buffer,
@@ -371,7 +384,9 @@ impl GpuTdtDecoder {
             gpu.queue.submit([encoder.finish()]);
             if profiled_steps > 0 {
                 let (_, ticks) = profile.as_ref().unwrap();
-                let bytes = gpu.readback(ticks, (1 + profiled_steps * 8) as u64 * 8)?;
+                let bytes = gpu
+                    .readback_async(ticks, (1 + profiled_steps * 8) as u64 * 8)
+                    .await?;
                 let period = gpu.queue.get_timestamp_period() as f64;
                 for step_index in 0..profiled_steps as usize {
                     let base = 1 + step_index * 8;
@@ -389,7 +404,7 @@ impl GpuTdtDecoder {
             chunks += 1;
 
             let wait_started = crate::clock::now();
-            let bytes = gpu.readback(&result, result_bytes)?;
+            let bytes = gpu.readback_async(&result, result_bytes).await?;
             wait_seconds += wait_started.elapsed().as_secs_f32();
             let header = result_header(&bytes);
             last_bytes = bytes;

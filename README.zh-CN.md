@@ -2,7 +2,7 @@
 
 **基于 wgpu 的 Bark 3.0 语音识别（Rust 实现）。**
 
-[![GitHub stars](https://img.shields.io/github/stars/eclipse005/bark3-pro-wgpu?style=flat-square&logo=github&color=f59e0b)](https://github.com/eclipse005/bark3-pro-wgpu/stargazers) [![GitHub forks](https://img.shields.io/github/forks/eclipse005/bark3-pro-wgpu?style=flat-square&logo=github)](https://github.com/eclipse005/bark3-pro-wgpu/network/members) [![Build](https://img.shields.io/github/actions/workflow/status/eclipse005/bark3-pro-wgpu/build.yml?branch=main&style=flat-square&label=build)](https://github.com/eclipse005/bark3-pro-wgpu/actions/workflows/build.yml) [![License](https://img.shields.io/github/license/eclipse005/bark3-pro-wgpu?style=flat-square&color=16a34a)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/eclipse005/bark3-wgpu?style=flat-square&logo=github&color=f59e0b)](https://github.com/eclipse005/bark3-wgpu/stargazers) [![GitHub forks](https://img.shields.io/github/forks/eclipse005/bark3-wgpu?style=flat-square&logo=github)](https://github.com/eclipse005/bark3-wgpu/network/members) [![Build](https://img.shields.io/github/actions/workflow/status/eclipse005/bark3-wgpu/build.yml?branch=main&style=flat-square&label=build)](https://github.com/eclipse005/bark3-wgpu/actions/workflows/build.yml) [![License](https://img.shields.io/github/license/eclipse005/bark3-wgpu?style=flat-square&color=16a34a)](LICENSE)
 
 [![Windows](https://img.shields.io/badge/Windows-x64-0078D6?style=flat-square&logo=windows)](#安装) [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-111111?style=flat-square&logo=apple&logoColor=white)](#安装) [![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?style=flat-square&logo=linux&logoColor=111111)](#安装)
 
@@ -26,14 +26,14 @@
 
 ```toml
 [dependencies]
-bark3-pro-wgpu = { git = "https://github.com/eclipse005/bark3-pro-wgpu.git" }
+bark3-wgpu = { git = "https://github.com/eclipse005/bark3-wgpu.git" }
 ```
 
 或从源码构建：
 
 ```bash
-git clone https://github.com/eclipse005/bark3-pro-wgpu.git
-cd bark3-pro-wgpu
+git clone https://github.com/eclipse005/bark3-wgpu.git
+cd bark3-wgpu
 cargo build --release        # target/release/bark3
 ```
 
@@ -91,7 +91,7 @@ bark3 --model ../models/Underdog-Bark-3.0-Pro transcribe ./audio.wav
 ### 作为库使用
 
 ```rust
-use bark3_pro_wgpu::{AsrInference, Backend, TranscribeOptions};
+use bark3_wgpu::{AsrInference, Backend, TranscribeOptions};
 
 let asr = AsrInference::load("models/Underdog-Bark-3.0-Pro", Backend::best())?;
 let out = asr.transcribe("audio.wav", TranscribeOptions::default())?;

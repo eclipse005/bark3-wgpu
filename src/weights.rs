@@ -106,12 +106,24 @@ pub fn open_bytes(
     data: std::sync::Arc<Vec<u8>>,
     release: Option<String>,
 ) -> Result<Box<dyn WeightSource>> {
+    // A compressed release is length-prefixed JSON whose `format` says so. A
+    // safetensors file is length-prefixed JSON too (and torch writes a
+    // `"format":"pt"` in it), so the marker has to be the bark format tag
+    // itself — otherwise the full-precision checkpoint is handed to the
+    // container reader and rejected.
     let looks_like_container = data.len() > 8 && {
         let len = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
         len > 0
             && len < (64 << 20)
             && data.len() > 8 + len
-            && String::from_utf8_lossy(&data[8..(8 + len).min(data.len())]).contains("\"format\"")
+            && serde_json::from_slice::<serde_json::Value>(&data[8..8 + len])
+                .ok()
+                .and_then(|head| {
+                    head["format"]
+                        .as_str()
+                        .map(|tag| tag.starts_with("bark-levels-"))
+                })
+                .unwrap_or(false)
     };
     if looks_like_container {
         Ok(Box::new(BarkContainer::from_bytes(data, release)?))

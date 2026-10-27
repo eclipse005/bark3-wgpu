@@ -13,7 +13,7 @@ mod golden;
 use std::path::Path;
 
 use anyhow::Result;
-use bark3_pro_wgpu::AsrInference;
+use bark3_wgpu::AsrInference;
 
 /// Commands that read the torch reference dumps. Those dumps are local
 /// verification assets (a few hundred megabytes) and are not shipped, so the
@@ -81,7 +81,7 @@ pub fn dispatch(command: &str, asr: &AsrInference, root: &Path) -> Option<Result
 }
 
 pub fn dump_wgsl() -> Result<()> {
-    let wgsl = bark3_pro_wgpu::encoder::gemm_mix(false);
+    let wgsl = bark3_wgpu::encoder::gemm_mix(false);
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/gemm_mix.wgsl");
     let file = std::fs::File::create(&path)?;
     std::io::Write::write_all(&mut std::io::BufWriter::new(file), wgsl.as_bytes())?;

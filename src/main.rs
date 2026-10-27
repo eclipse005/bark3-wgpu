@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use bark3_pro_wgpu::{AsrInference, Backend, TranscribeOptions};
+use bark3_wgpu::{AsrInference, Backend, TranscribeOptions};
 
 const USAGE: &str = "usage: bark3 --model <checkpoint-dir> transcribe <16k-mono.wav>\n\
                      \x20      bark3 --model <checkpoint-dir> golden | pooldec | cpuenc | <diagnostic>\n\

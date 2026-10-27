@@ -1,10 +1,10 @@
 use anyhow::Result;
-use bark3_pro_wgpu::encoder::{Encoder, Weight};
+use bark3_wgpu::encoder::{Encoder, Weight};
 
 use super::{diff_report, read_f32};
 
 pub fn attn32_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let pp = pad128(2 * t_real - 1) as u32;
@@ -15,7 +15,7 @@ pub fn attn32_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 
     let mut normed_pad = vec![0f32; tp as usize * 1024];
     normed_pad[..t_real * 1024].copy_from_slice(&read_f32(&golden.join("torch_normed_sa.bin")));
-    let pos_real = bark3_pro_wgpu::encoder::pos_embed_f32(t_real);
+    let pos_real = bark3_wgpu::encoder::pos_embed_f32(t_real);
     let mut pos_pad = vec![0f32; pp as usize * 1024];
     pos_pad[..pos_real.len()].copy_from_slice(&pos_real);
     let normed = g.storage("a3_normed", tp as u64 * 512 * 4);
@@ -23,14 +23,12 @@ pub fn attn32_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
     g.queue.write_buffer(
         &normed,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(
-            &normed_pad,
-        )),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&normed_pad)),
     );
     g.queue.write_buffer(
         &pos,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(&pos_pad)),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&pos_pad)),
     );
 
     let mk = |n: u64| g.storage("a3", n * 4);
@@ -217,7 +215,7 @@ pub fn attn32_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 }
 
 pub fn attn_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let pp = pad128(2 * t_real - 1) as u32;
@@ -227,7 +225,7 @@ pub fn attn_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 
     let mut normed_pad = vec![0f32; tp as usize * 1024];
     normed_pad[..t_real * 1024].copy_from_slice(&read_f32(&golden.join("torch_normed_sa.bin")));
-    let pos_real = bark3_pro_wgpu::encoder::pos_embed_f32(t_real);
+    let pos_real = bark3_wgpu::encoder::pos_embed_f32(t_real);
     let mut pos_pad = vec![0f32; pp as usize * 1024];
     pos_pad[..pos_real.len()].copy_from_slice(&pos_real);
     let normed = g.storage("at_normed", tp as u64 * 512 * 4);
@@ -235,14 +233,12 @@ pub fn attn_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
     g.queue.write_buffer(
         &normed,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(
-            &normed_pad,
-        )),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&normed_pad)),
     );
     g.queue.write_buffer(
         &pos,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(&pos_pad)),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&pos_pad)),
     );
 
     let mk = |n: u64| g.storage("at", n * 4);

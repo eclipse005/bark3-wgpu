@@ -21,7 +21,7 @@
 //! segment assembly — is the library the CLI uses, so the JSON matches what
 //! `bark3 transcribe` prints for the same audio.
 
-use bark3_pro_wgpu::{AsrInference, Backend, TranscribeOptions};
+use bark3_wgpu::{AsrInference, Backend, TranscribeOptions};
 use wasm_bindgen::prelude::*;
 
 /// A loaded model. Created once per page, reused for every recording.
@@ -50,22 +50,26 @@ impl BarkAsr {
             _ => Backend::Auto,
         };
         let bytes = std::sync::Arc::new(model);
-        let source: Box<dyn bark3_pro_wgpu::weights::WeightSource> =
-            match bark3_pro_wgpu::weights::open_bytes(bytes, release) {
+        let source: Box<dyn bark3_wgpu::weights::WeightSource> =
+            match bark3_wgpu::weights::open_bytes(bytes, release) {
                 Ok(src) => src,
                 Err(e) => return Err(JsError::new(&format!("{e:#}"))),
             };
         let inner = AsrInference::load_source(source, backend)
             .await
             .map_err(|e| JsError::new(&format!("{e:#}")))?;
-        Ok(BarkAsr { inner })
+        bark3_wgpu::browser::log("[wasm] create: inference ready");
+        let out = BarkAsr { inner };
+        bark3_wgpu::browser::log("[wasm] create: returning");
+        Ok(out)
     }
 
     /// One JSON document: `{ text, duration, segments, words }`, the same the CLI
     /// prints. `samples` are 16 kHz mono f32.
-    pub fn transcribe(&self, samples: &[f32]) -> Result<String, JsError> {
+    pub async fn transcribe(&self, samples: Vec<f32>) -> Result<String, JsError> {
         self.inner
-            .transcribe_samples(samples, TranscribeOptions::default())
+            .transcribe_samples_async(&samples, TranscribeOptions::default())
+            .await
             .map(|r| r.to_json())
             .map_err(|e| JsError::new(&format!("{e:#}")))
     }
@@ -76,9 +80,14 @@ impl BarkAsr {
     /// each silence between two speech runs. Word times come back on the
     /// recording's timeline, in one JSON document.
     #[wasm_bindgen(js_name = transcribeChunked)]
-    pub fn transcribe_chunked(&self, samples: &[f32], cuts: &[f32]) -> Result<String, JsError> {
+    pub async fn transcribe_chunked(
+        &self,
+        samples: Vec<f32>,
+        cuts: Vec<f32>,
+    ) -> Result<String, JsError> {
         self.inner
-            .transcribe_chunked(samples, cuts, TranscribeOptions::default())
+            .transcribe_chunked_async(&samples, &cuts, TranscribeOptions::default())
+            .await
             .map(|r| r.to_json())
             .map_err(|e| JsError::new(&format!("{e:#}")))
     }

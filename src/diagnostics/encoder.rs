@@ -1,10 +1,10 @@
 use anyhow::Result;
-use bark3_pro_wgpu::encoder::Encoder;
+use bark3_wgpu::encoder::Encoder;
 
 use super::{diff_report, read_f32};
 
 pub fn f2h_mix_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let g = &enc.gpu;
@@ -49,7 +49,7 @@ pub fn f2h_mix_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 }
 
 pub fn ff1a_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let g = &enc.gpu;
@@ -95,7 +95,7 @@ pub fn ff1a_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 }
 
 pub fn lnf32_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let g = &enc.gpu;
@@ -120,7 +120,7 @@ pub fn lnf32_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 }
 
 pub fn ln_test(enc: &Encoder) -> Result<()> {
-    use bark3_pro_wgpu::encoder::pad128;
+    use bark3_wgpu::encoder::pad128;
     let tp = pad128(4) as u32;
     let g = &enc.gpu;
     let mk = |n: u64| g.storage("t", n * 4);
@@ -135,10 +135,10 @@ pub fn ln_test(enc: &Encoder) -> Result<()> {
     g.queue.write_buffer(
         &h,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(&vals)),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&vals)),
     );
 
-    let mut ctx = bark3_pro_wgpu::encoder::Ctx::new(enc, 0);
+    let mut ctx = bark3_wgpu::encoder::Ctx::new(enc, 0);
     let mut e2 = g.device.create_command_encoder(&Default::default());
     {
         let mut cp = e2.begin_compute_pass(&Default::default());
@@ -162,7 +162,7 @@ pub fn ln_test(enc: &Encoder) -> Result<()> {
 }
 
 pub fn epi_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let g = &enc.gpu;
@@ -172,7 +172,7 @@ pub fn epi_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
     g.queue.write_buffer(
         &h,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(&h_pad)),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&h_pad)),
     );
     let normed = g.storage("ep_n", tp as u64 * 512 * 4);
     let pooler = g.storage("ep_p", tp as u64 * 320 * 4);
@@ -217,7 +217,7 @@ pub fn epi_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
 }
 
 pub fn ffn_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
-    use bark3_pro_wgpu::encoder::{Ctx, pad128};
+    use bark3_wgpu::encoder::{Ctx, pad128};
     let t_real = 191usize;
     let tp = pad128(t_real) as u32;
     let g = &enc.gpu;
@@ -228,7 +228,7 @@ pub fn ffn_test(enc: &Encoder, golden: &std::path::Path) -> Result<()> {
     g.queue.write_buffer(
         &normed,
         0,
-        bytemuck::cast_slice(&bark3_pro_wgpu::raw::RawTensor::f32_to_f16_words(&n_pad)),
+        bytemuck::cast_slice(&bark3_wgpu::raw::RawTensor::f32_to_f16_words(&n_pad)),
     );
     let ffb = g.storage("fn_f", tp as u64 * 2048 * 4);
     let tmp = g.storage("fn_t", tp as u64 * 512 * 4);

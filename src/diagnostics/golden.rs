@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
-use bark3_pro_wgpu::encoder::pos_embed_f32;
-use bark3_pro_wgpu::sub::subsample;
-use bark3_pro_wgpu::transcript::{tokens_to_text, vocab};
+use bark3_wgpu::encoder::pos_embed_f32;
+use bark3_wgpu::sub::subsample;
+use bark3_wgpu::transcript::{tokens_to_text, vocab};
 
-use bark3_pro_wgpu::AsrInference;
+use bark3_wgpu::AsrInference;
 
 use super::{diff_report, read_f32};
 

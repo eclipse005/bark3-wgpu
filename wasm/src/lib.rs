@@ -55,10 +55,23 @@ impl BarkAsr {
                 Ok(src) => src,
                 Err(e) => return Err(JsError::new(&format!("{e:#}"))),
             };
-        let inner = AsrInference::load_source(source, backend)
+        let mut inner = AsrInference::load_source(source, backend)
             .await
             .map_err(|e| JsError::new(&format!("{e:#}")))?;
         bark3_wgpu::browser::log("[wasm] create: inference ready");
+        if inner.backend() != Backend::Cpu {
+            // Dawn compiles each pipeline at its first dispatch; doing that here
+            // keeps it off the first real transcription (see `warmup_async`).
+            let t = bark3_wgpu::clock::now();
+            match inner.warmup_async().await {
+                Ok(()) => bark3_wgpu::browser::log(&format!(
+                    "[wasm] warmup {:.2}s",
+                    t.elapsed().as_secs_f32()
+                )),
+                Err(e) => bark3_wgpu::browser::log(&format!("[wasm] warmup failed: {e:#}")),
+            }
+        }
+        let inner = inner;
         let out = BarkAsr { inner };
         bark3_wgpu::browser::log("[wasm] create: returning");
         Ok(out)

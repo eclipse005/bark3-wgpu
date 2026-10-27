@@ -328,3 +328,27 @@ on             start 14.07 vs 14.15
 
 **顺手修掉的一个 panic**：给 wasm 的 pipeline 校验错误加异步 `pop_error_scope` 之后，控制台开始出现 `pageerror: RuntimeError: unreachable`——wgpu 内部 `Mismatched pop_error_scope call`。错误作用域是**栈**，批量创建管线时异步 pop 会乱序。现在浏览器端不压栈，直接靠 `on_uncaptured_error` 打日志；原生仍用同步作用域并报出管线名。
 
+
+---
+
+## 14. 2026-10-27 wasm 侧优化：管线预热
+
+**问题**：Dawn 在**首次 dispatch** 时才编译 compute pipeline。页面里第一次转录要替整次加载付这笔钱——实测 20 条语料里第一条（9.9 s 音频）耗时 **1528 ms**，其余条目 140–280 ms。
+
+**做法**：`AsrInference::warmup_async()` 用 2 s 静音把整条链路跑一遍（编码器 + GPU TDT），wasm 的 `create()` 在权重加载完成后调用它；加载时间多约 1.3 s，用户的第一段音频不再等。同时把 `[time]` 行接进浏览器控制台，才看清 `enc` 只有 14 ms/60 s chunk（host 编码很便宜）、时间全在等待 GPU。
+
+**结果**（20 条语料，202 s 音频，Chrome + P104-100）：
+
+| 模型 | 预热前 | 预热后 | 原生同卡 |
+|---|---:|---:|---:|
+| Plus | 39–43x | **55.7x** | 81.1x |
+| Pro | 39–40x | **58.6x** | 85.3x |
+
+第一条语料：1528 ms → **167 ms**；20/20 假设仍与原生逐字相同，WER/CER 不变。
+
+**还剩什么瓶颈**
+
+1. **加载 12.5 s（Plus）几乎全是容器解码**（ANS + 纯 Rust LZMA），不是 GPU：Pro 的 safetensors 1.25 GB 只要 3.2 s。解法是 OPFS 缓存解码后的张量（二次加载 ~2 s，§8 待办 2）。
+2. **稳态 55–59x vs 原生 81–85x**：差在 Chrome 每次 dispatch/bind group 的 JS 边界与 Dawn 校验；host 编码实测只占 14 ms，所以不是 Rust 侧的开销。
+3. **CPU 回退仍 0.27x**：只有 SIMD128 能救（§8 待办 3）。
+

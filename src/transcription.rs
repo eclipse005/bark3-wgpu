@@ -245,12 +245,16 @@ pub(crate) async fn run_async(
     // The processed length includes the 0.25 s pad, which is what the stages
     // above actually ran on.
     let processed = wave.len() as f32 / 16_000.0;
-    eprintln!(
+    let line = format!(
         "[time] mel {t_mel:.3}s sub {t_sub:.3}s enc {t_enc:.3}s dec {t_dec:.3}s | audio {processed:.2}s RTFx={:.1}x | tokens {} words {} segments {}",
         processed / (t_mel + t_sub + t_enc + t_dec),
         transcript.tokens.len(),
         transcript.words.len(),
         transcript.segments.len()
     );
+    // stderr goes nowhere in the browser, and this line is the only per-stage
+    // split there is.
+    crate::browser::log(&line);
+    eprintln!("{line}");
     Ok(transcript)
 }

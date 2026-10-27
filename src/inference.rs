@@ -447,6 +447,20 @@ impl AsrInference {
     ) -> Result<TranscribeResult> {
         crate::transcription::run_async(self, samples, None, &options).await
     }
+
+    /// Compiles and runs every pipeline once, on two seconds of silence.
+    ///
+    /// Chrome's Dawn compiles a compute pipeline on its first dispatch, so
+    /// without this the first real transcription pays the whole shader
+    /// compilation bill — around 1.3 s for this model. Loading already pays
+    /// more than that for the weights, so the browser calls this from
+    /// `BarkAsr::create` and moves the cost off the user's first clip.
+    pub async fn warmup_async(&self) -> Result<()> {
+        let samples = vec![0.0f32; 32_000];
+        self.transcribe_samples_async(&samples, TranscribeOptions::default())
+            .await?;
+        Ok(())
+    }
 }
 
 /// The bundled mel filterbank, `[128, 257]` f32.

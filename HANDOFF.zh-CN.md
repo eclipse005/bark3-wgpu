@@ -499,3 +499,12 @@ March thirteenth, 2022. A man slips ...     ← 修复后
 - 上传**整个官方目录**（Pro 带 config/tokenizer/runtime），不要只传 `model.safetensors`——否则 `AutoProcessor` 没法用；
 - 不要上传本项目生成的东西（`lowbit.json`、dump、pkg 等）；目前 `D:\models` 里也没有这类文件。
 
+**两种布局是官方就这么给的，不要统一**
+
+| 发布 | 布局 | 头部 |
+|---|---|---|
+| Pro（1.25 GB） | safetensors，723 个张量，`BF16` × 699 + `I64` × 24，`__metadata__.format = "pt"` | 配套 `config.json` / `tokenizer*.json` / `processor_config.json`，`transformers` 的 `ParakeetForTDT` 能直接 `from_pretrained` |
+| 3.0 / Plus / Clean（155–180 MB） | 自有容器 `model.bark`：8 字节长度 + JSON 头，`format = "bark-levels-v3"`，头里自带完整 `config` 和 723 条 `index`（name / kind / dtype / shape / 压缩偏移），载荷是 ANS/LZMA 编码的 4-bit 码 + 行 fp16 电平 | 没有单独的 config/tokenizer，配置就在头里 |
+
+所以镜像时**保持原样**：Pro 必须留着 `model.safetensors` 和那几个 json，三个低比特必须是 `model.bark`；改名或转格式都会让下游读不了。
+

@@ -263,3 +263,37 @@ on             start 14.07 vs 14.15
 
 复现/对拍脚本（仓库外，`D:\Bark\bark3-verify\e2e\`）：
 `gpu_diag.py`（逐行日志）、`json_dump.py`（导出浏览器 JSON 便于 diff）、`repeat.py`（确定性）、`gpu_info.py`（Chrome 用哪块卡）、`wgsl_check.py` + `D:\bark3-demo\check\`（单个 shader 在 Chrome 里编译并打 `getCompilationInfo`）。
+
+---
+
+## 12. 2026-10-27 设备实测：Intel Xe 集显 / 独显 / CPU（原生 wgpu）
+
+环境：Intel(R) Graphics（Xe-LPG，驱动 101.8860，**Vulkan**，wg workgroup storage 49152 B、**maxStorageBufferBindingSize 只有 1023 MiB**）、NVIDIA P104-100（Vulkan，2047 MiB）、CPU（AVX2，约 20 线程）。音频为 `D:\Bark\bark3-verify\data\{15s,90s,180s}_16k.wav`，RTFx 取自 `[time]` 行的 mel+sub+enc+dec。`BARK3_DEVICE=intel|nvidia` / `BARK3_CPU_ENC=1` 切换。
+
+| 设备 | 模型 | 15 s | 90 s | 180 s | 20 条语料（corpus） |
+|---|---|---:|---:|---:|---:|
+| **Intel Xe 集显** | Pro（bf16） | 11.9x | 11.2x | 10.6x | **8.8x** |
+| **Intel Xe 集显** | Plus（low-bit） | 9.5x | 8.8x | 8.4x | **7.6x** |
+| NVIDIA P104-100 | Pro | 97.7x | 103.2x | 90.1x | 85.3x |
+| NVIDIA P104-100 | Plus | 80.4x | 94.0x | 88.0x | 81.1x |
+| CPU（AVX2） | Pro | — | 46.9x | — | — |
+| CPU（AVX2） | Plus | — | 47.7x | — | — |
+
+精度（20 条英文语料，202 s，WER/CER 用本仓库外脚本 `eval_device.py` 的归一化：小写 + 去标点）：
+
+| 模型 | WER | CER | Intel 集显 | NVIDIA 独显 |
+|---|---:|---:|---|---|
+| Pro | 4.58% | 1.41% | 20/20 假设逐字相同 | 同左 |
+| Plus | 4.91% | 1.43% | 20/20 相同 | 同左 |
+| Clean | 5.10% | 2.48% | 20/20 相同 | 同左 |
+| 3.0 | 6.11% | 2.52% | 20/20 相同 | 同左 |
+
+`BARK3_DEVICE=intel pwsh D:/Bark/bark3-verify/verify.ps1 -Model D:/models/Underdog-Bark-3.0-Pro` → **ALL PASS**：集显上 GPU 输出与 torch 参考逐字节一致（golden + 3 fixture + cpuenc/pooldec/gputdt + JSON），不只是「词一样」。
+
+**结论**
+
+1. **本机集显没有使用价值**：9–12x 比 CPU（约 47x）慢 4–5 倍，更别说独显（90–100x）。想省电/占用小可以用，但别指望它加速。
+2. **集显上 Pro 比 Plus 快约 25%**：低比特 GEMM 的 nibble 解包 + 表查在算力受限的 iGPU 上比省下来的带宽更贵；独显上两者接近（Pro 仍略快）。
+3. **分块自适应是安全的**：集显 `maxStorageBufferBindingSize` 只有独显的一半，编码器的 tile 选择会不同，但 20/20 假设逐字相同、门禁也逐字节通过。
+4. 跨设备精度完全一致（同一权重），差异只在速度——所以「集显能不能用」的答案是：能算对，但慢。
+

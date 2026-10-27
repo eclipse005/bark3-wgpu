@@ -39,26 +39,20 @@ cargo build --release        # target/release/bark3
 
 ### Model download
 
-Weights are **not** included in this repository (rights remain with the original authors, CC-BY-4.0). Download a release and pass the directory to `--model`:
+Weights are **not** included in this repository (rights remain with the original authors, CC-BY-4.0). Download a release and pass the directory to `--model`; nothing has to be converted:
 
-| Model | Download | Notes |
-|---|---:|---|
-| [Underdog-Bark-3.0-Pro](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Pro) | 1.25 GB | Full precision, best accuracy |
-| [Underdog-Bark-3.0-Plus](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Plus) | 180 MB | Low-bit, closest to Pro |
-| [Underdog-Bark-3.0](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0) | 163 MB | Low-bit, smallest download |
-| [Underdog-Bark-3.0-Clean](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Clean) | 180 MB | Low-bit, removes fillers and false starts |
+| Model | Download | Layout | Notes |
+|---|---:|---|---|
+| [Underdog-Bark-3.0-Pro](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Pro) | 1.25 GB | `model.safetensors` (bf16) | Full precision, best accuracy |
+| [Underdog-Bark-3.0-Plus](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Plus) | 180 MB | `model.bark` | Low-bit, closest to Pro |
+| [Underdog-Bark-3.0](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0) | 163 MB | `model.bark` | Low-bit, smallest download |
+| [Underdog-Bark-3.0-Clean](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Clean) | 180 MB | `model.bark` | Low-bit, removes fillers and false starts |
 
-Pro ships `model.safetensors` and works as downloaded. The other three ship a compressed `model.bark` container; convert it once into this crate's low-bit layout:
-
-```bash
-pip install numpy constriction safetensors
-python tools/encode_lowbit.py model.bark ../models/Underdog-Bark-3.0-Plus \
-    --reference ../models/Underdog-Bark-3.0-Pro
-```
-
-The converter keeps the 4-bit codes and per-row level tables, so the low-bit
-weights land at ~380 MiB of VRAM instead of 1.2 GiB, and it records the release
-name plus the container's SHA-256 in `bark3.json`.
+The compressed releases keep the encoder linears as 4-bit codes plus a per-row
+level table. The loader reads that container directly and hands the codes to the
+GEMM, so a 163 MB download runs in ~380 MiB of VRAM instead of the 1.2 GiB an f16
+expansion would need. The layout is identified from the header, and a checkpoint
+whose architecture does not match this build is refused before any weights move.
 
 ### Quick Start
 

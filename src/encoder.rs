@@ -17,7 +17,9 @@ use bytemuck::Pod;
 use bytemuck::Zeroable;
 
 use crate::cfg;
+use crate::bark::LowBitTensor;
 use crate::gpu::{BulkUpload, Gpu};
+use crate::weights::WeightSource;
 use crate::raw::RawTensor;
 use crate::shaders;
 
@@ -283,39 +285,32 @@ enum EntryKind {
 
 use EntryKind::{Ro, Rw, UniDyn};
 
-/// Upload a low-bit dense weight: `[levels: n x 4 f16][codes: n x codes_ld u32]`.
+/// Upload a 4-bit weight: `[levels: rows x 4 f16][codes: rows x codes_ld u32]`.
 ///
 /// The layout is what `gemm_mix_bm64_lb` expects: the level table first (two
 /// words per output row) so the kernel can find it from one base offset, then
 /// the codes, eight 4-bit weights per word along the input dimension.
-#[allow(clippy::too_many_arguments)]
-fn load_lowbit(
+fn upload_lowbit(
     gpu: &Gpu,
     up: &mut BulkUpload<'_>,
-    get: &dyn Fn(&str) -> Result<RawTensor>,
     label: &str,
-    name: &str,
-    n: u64,
-    k: u64,
-    k_lev: u32,
+    lb: &LowBitTensor,
 ) -> Result<Weight> {
-    let codes = get(name)?.to_u32();
-    let lev = get(&format!("{name}.levels"))?.to_f16_words();
-    let codes_ld = k.div_ceil(8) as u32;
-    let lev_words = 0u32;
-    let words = n * 2 + n * codes_ld as u64;
+    let rows = lb.rows;
+    let codes_ld = lb.cols.div_ceil(8) as u32;
     anyhow::ensure!(
-        lev.len() == (n * 2) as usize && codes.len() == (n * codes_ld as u64) as usize,
-        "{name}: low-bit layout mismatch"
+        lb.codes.len() == rows * codes_ld as usize && lb.levels.len() == rows * 4,
+        "{label}: low-bit layout mismatch"
     );
+    let words = rows as u64 * 2 + rows as u64 * codes_ld as u64;
     let buf = gpu.storage(label, words * 4);
-    up.upload(&buf, bytemuck::cast_slice(&lev))?;
-    up.upload_at(&buf, n * 2 * 4, bytemuck::cast_slice(&codes))?;
+    up.upload(&buf, bytemuck::cast_slice(&lb.levels))?;
+    up.upload_at(&buf, rows as u64 * 2 * 4, bytemuck::cast_slice(&lb.codes))?;
     Ok(Weight {
         buf,
         lb: Some(LowBit {
-            lev_words,
-            k_lev,
+            lev_words: 0,
+            k_lev: lb.k,
             codes_ld,
         }),
     })
@@ -326,9 +321,7 @@ fn load_lowbit(
 fn dense(
     gpu: &Gpu,
     up: &mut BulkUpload<'_>,
-    get: &dyn Fn(&str) -> Result<RawTensor>,
-    words16: &dyn Fn(&str) -> Vec<u32>,
-    lowbit: &std::collections::HashMap<String, u32>,
+    src: &dyn WeightSource,
     prefix: &str,
     layer: usize,
     label: &str,
@@ -337,20 +330,11 @@ fn dense(
     k: u64,
 ) -> Result<Weight> {
     let full = format!("{prefix}{name}");
-    if let Some(&k_lev) = lowbit.get(&full) {
-        return load_lowbit(
-            gpu,
-            up,
-            get,
-            &format!("l{layer}{label}"),
-            &full,
-            n,
-            k,
-            k_lev,
-        );
+    if let Some(lb) = src.read_lowbit(&full)? {
+        return upload_lowbit(gpu, up, &format!("l{layer}{label}"), &lb);
     }
     let b = gpu.storage(&format!("l{layer}{label}"), n * k * 2);
-    up.upload(&b, bytemuck::cast_slice(&words16(&full)))?;
+    up.upload(&b, bytemuck::cast_slice(&src.read(&full)?.to_f16_words()))?;
     Ok(Weight::f16(b))
 }
 
@@ -358,9 +342,7 @@ fn dense(
 fn load_qkv(
     gpu: &Gpu,
     up: &mut BulkUpload<'_>,
-    get: &dyn Fn(&str) -> Result<RawTensor>,
-    words16: &dyn Fn(&str) -> Vec<u32>,
-    lowbit: &std::collections::HashMap<String, u32>,
+    src: &dyn WeightSource,
     l: usize,
     p: &str,
 ) -> Result<Weight> {
@@ -368,42 +350,56 @@ fn load_qkv(
         .iter()
         .map(|x| format!("{p}{x}.weight"))
         .collect();
-    if let Some(&k_lev) = lowbit.get(&names[0]) {
+    let low: Vec<_> = names
+        .iter()
+        .map(|n| src.read_lowbit(n))
+        .collect::<Result<Vec<_>>>()?;
+    if low.iter().all(Option::is_some) {
+        let parts: Vec<std::sync::Arc<LowBitTensor>> =
+            low.into_iter().map(Option::unwrap).collect();
+        let k = parts[0].k;
         anyhow::ensure!(
-            names.iter().all(|n| lowbit.get(n) == Some(&k_lev)),
+            parts.iter().all(|t| t.k == k),
             "fused q/k/v must share one level count"
         );
-        let codes_ld = 1024u32 / 8;
-        let lev_words = 0u32;
+        let codes_ld = parts[0].cols.div_ceil(8) as u32;
+        let rows = parts[0].rows * parts.len();
         let buf = gpu.storage(
             &format!("l{l}qkv"),
-            (3072u64 * 2 + 3072 * codes_ld as u64) * 4,
+            (rows as u64 * 2 + rows as u64 * codes_ld as u64) * 4,
         );
-        for (i, name) in names.iter().enumerate() {
-            let lev = get(&format!("{name}.levels"))?.to_f16_words();
-            up.upload_at(&buf, i as u64 * 1024 * 2 * 4, bytemuck::cast_slice(&lev))?;
-            let codes = get(name)?.to_u32();
+        for (i, part) in parts.iter().enumerate() {
+            let base = i as u64 * part.rows as u64;
             up.upload_at(
                 &buf,
-                (3072 * 2 + i as u64 * 1024 * codes_ld as u64) * 4,
-                bytemuck::cast_slice(&codes),
+                base * 2 * 4,
+                bytemuck::cast_slice(&part.levels),
+            )?;
+            up.upload_at(
+                &buf,
+                (rows as u64 * 2 + base * codes_ld as u64) * 4,
+                bytemuck::cast_slice(&part.codes),
             )?;
         }
         return Ok(Weight {
             buf,
             lb: Some(LowBit {
-                lev_words,
-                k_lev,
+                lev_words: 0,
+                k_lev: k,
                 codes_ld,
             }),
         });
     }
+    anyhow::ensure!(
+        low.iter().all(Option::is_none),
+        "fused q/k/v mixes low-bit and f16 storage"
+    );
     let buf = gpu.storage(&format!("l{l}qkv"), 3 * 1024 * 1024 * 2);
     for (i, name) in names.iter().enumerate() {
         up.upload_at(
             &buf,
             (i * 1024 * 1024 * 2) as u64,
-            bytemuck::cast_slice(&words16(name)),
+            bytemuck::cast_slice(&src.read(name)?.to_f16_words()),
         )?;
     }
     Ok(Weight::f16(buf))
@@ -411,46 +407,28 @@ fn load_qkv(
 
 impl Encoder {
     pub fn load(gpu: Gpu, w: &std::collections::HashMap<String, RawTensor>) -> Result<Self> {
-        Self::load_with(gpu, &std::collections::HashMap::new(), &|n| {
-            w.get(n)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("missing tensor {n}"))
-        })
+        Self::load_with(gpu, &crate::weights::from_map(w))
     }
 
-    /// Tensor-at-a-time variant: a streaming reader can supply each tensor and
-    /// release it once it is on the device, so the whole 1.25 GB checkpoint is
-    /// never resident on the host.
-    pub fn load_with(
-        gpu: Gpu,
-        lowbit: &std::collections::HashMap<String, u32>,
-        get: &dyn Fn(&str) -> Result<RawTensor>,
-    ) -> Result<Self> {
+    /// Loads from whichever official layout the checkpoint uses: bf16
+    /// `model.safetensors`, or the `model.bark` container whose encoder linears
+    /// stay 4-bit. `src.prefetch()` decodes the container in parallel first.
+    pub fn load_with(gpu: Gpu, src: &dyn WeightSource) -> Result<Self> {
+        src.prefetch()?;
         // A read failure here means the checkpoint is truncated; the previous
         // map-based loader panicked on a missing tensor for the same reason.
-        let t = |n: &str| get(n).unwrap_or_else(|e| panic!("tensor {n}: {e}"));
-        let tf = |n: &str| get(n);
+        let t = |n: &str| src.read(n).unwrap_or_else(|e| panic!("tensor {n}: {e}"));
         let mut up = gpu.uploader();
         let words16 = |n: &str| -> Vec<u32> { t(n).to_f16_words() };
 
-        let sub_w = if let Some(&k_lev) = lowbit.get("encoder.subsampling.linear.weight") {
-            load_lowbit(
-                &gpu,
-                &mut up,
-                &tf,
-                "sub_w",
-                "encoder.subsampling.linear.weight",
-                1024,
-                4096,
-                k_lev,
-            )?
-        } else {
-            let b = gpu.storage("sub_w", 1024 * 4096 * 2);
-            up.upload(
-                &b,
-                bytemuck::cast_slice(&words16("encoder.subsampling.linear.weight")),
-            )?;
-            Weight::f16(b)
+        let sub_w_name = "encoder.subsampling.linear.weight";
+        let sub_w = match src.read_lowbit(sub_w_name)? {
+            Some(lb) => upload_lowbit(&gpu, &mut up, "sub_w", &lb)?,
+            None => {
+                let b = gpu.storage("sub_w", 1024 * 4096 * 2);
+                up.upload(&b, bytemuck::cast_slice(&words16(sub_w_name)))?;
+                Weight::f16(b)
+            }
         };
         let sub_b = gpu.storage("sub_b", 1024 * 4);
         up.upload(
@@ -461,16 +439,14 @@ impl Encoder {
         let mut layers = Vec::with_capacity(cfg::LAYERS);
         for l in 0..cfg::LAYERS {
             let p = format!("encoder.layers.{l}.");
-            let qkv = load_qkv(&gpu, &mut up, &tf, &words16, lowbit, l, &p)?;
+            let qkv = load_qkv(&gpu, &mut up, src, l, &p)?;
 
             // Dense GEMM weight: f16 halves, or 4-bit codes + levels when the
             // checkpoint ships them (see LowBit).
             let relk = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "relk",
@@ -481,9 +457,7 @@ impl Encoder {
             let o = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "o",
@@ -494,9 +468,7 @@ impl Encoder {
             let ff1a = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "ff1a",
@@ -507,9 +479,7 @@ impl Encoder {
             let ff2a = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "ff2a",
@@ -520,9 +490,7 @@ impl Encoder {
             let pw1 = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "pw1",
@@ -533,9 +501,7 @@ impl Encoder {
             let pw2 = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "pw2",
@@ -559,9 +525,7 @@ impl Encoder {
             let ff1b = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "ff1b",
@@ -572,9 +536,7 @@ impl Encoder {
             let ff2b = dense(
                 &gpu,
                 &mut up,
-                &tf,
-                &words16,
-                lowbit,
+                src,
                 &p,
                 l,
                 "ff2b",

@@ -33,14 +33,13 @@ use crate::cpu::CpuEncoder;
 use crate::encoder::Encoder;
 use crate::gpu::{DeviceSelector, Gpu};
 use crate::mel::{MelFrontend, read_wav};
-use crate::raw::RawTensor;
+use crate::weights::WeightSource;
 use crate::segment::Limits;
 use crate::sub::SubsamplingWeights;
 use crate::sub_gpu::SubGpu;
 use crate::tdt::TdtDecoder;
 use crate::tdt_gpu::GpuTdtDecoder;
 use crate::transcript::TranscribeResult;
-use crate::weights_io::TensorReader;
 
 /// The NeMo mel filterbank the reference front end uses, bundled as f32 so the
 /// checkpoint directory is the only input.
@@ -167,30 +166,30 @@ pub struct AsrInference {
 }
 
 impl AsrInference {
-    /// Load weights from a checkpoint directory (`model.safetensors` +
-    /// `config.json`) and build `backend`.
+    /// Load weights from an official checkpoint directory and build `backend`.
+    ///
+    /// The directory may hold either layout the releases ship: a
+    /// `model.safetensors` (full precision) or a `model.bark` container (the
+    /// compressed releases, whose encoder linears stay 4-bit). Nothing has to be
+    /// converted first, and nothing is guessed: the header is read, the
+    /// architecture is checked against this build, and only then are weights
+    /// uploaded.
     pub fn load(model_dir: impl AsRef<Path>, backend: Backend) -> Result<Self> {
         let model_dir = model_dir.as_ref().to_path_buf();
-        // Read the header first: it says which release this is, and it must say
-        // the architecture this build was compiled for. Cheaper and clearer than
-        // discovering it from a missing tensor after a 1.2 GB upload.
-        let info = crate::weights_io::probe(&model_dir)?;
+        let src = crate::weights::open(&model_dir)?;
+        let info = src.info().clone();
         info.check_architecture()?;
         eprintln!("[model] {}", info.summary());
         let started = std::time::Instant::now();
-        // One checkpoint reader serves both backends: each tensor is read, used
-        // and released, so the 1.25 GB file never has to be resident as a whole.
-        let src = TensorReader::open_model(&model_dir)?;
+
         let get = |n: &str| src.read(n);
-        // A low-bit checkpoint names the tensors it ships as codes + levels.
-        let lowbit = read_lowbit(&model_dir)?;
         let tdt = TdtDecoder::from_source(&get)?;
         let sub_w = SubsamplingWeights::from_source(&get)?;
 
         let gpu = match backend {
             Backend::Cpu => None,
-            Backend::Gpu => Some(Self::load_gpu(&get, &lowbit, &tdt, &sub_w)?),
-            Backend::Auto => match Self::load_gpu(&get, &lowbit, &tdt, &sub_w) {
+            Backend::Gpu => Some(Self::load_gpu(src.as_ref(), &tdt, &sub_w)?),
+            Backend::Auto => match Self::load_gpu(src.as_ref(), &tdt, &sub_w) {
                 Ok(gpu) => Some(gpu),
                 Err(err) => {
                     eprintln!("[gpu] unavailable ({err:#}); falling back to the CPU backend");
@@ -201,7 +200,7 @@ impl AsrInference {
         let cpu = if gpu.is_some() {
             None
         } else {
-            Some(Self::load_cpu(&get)?)
+            Some(Self::load_cpu(src.as_ref())?)
         };
         let backend = if gpu.is_some() {
             Backend::Gpu
@@ -227,22 +226,21 @@ impl AsrInference {
     }
 
     fn load_gpu(
-        get: &impl Fn(&str) -> Result<RawTensor>,
-        lowbit: &std::collections::HashMap<String, u32>,
+        src: &dyn WeightSource,
         tdt: &TdtDecoder,
         sub_w: &SubsamplingWeights,
     ) -> Result<GpuState> {
         let gpu = pollster::block_on(Gpu::new_with(DeviceSelector::Auto))?;
         eprintln!("[gpu] {}", gpu.describe());
-        let enc = Encoder::load_with(gpu, lowbit, get)?;
+        let enc = Encoder::load_with(gpu, src)?;
         let decode = GpuTdtDecoder::new(&enc.gpu, tdt)?;
         let sub = SubGpu::new(&enc.gpu, sub_w)?;
         Ok(GpuState { enc, decode, sub })
     }
 
-    fn load_cpu(get: &impl Fn(&str) -> Result<RawTensor>) -> Result<CpuEncoder> {
+    fn load_cpu(src: &dyn WeightSource) -> Result<CpuEncoder> {
         let started = std::time::Instant::now();
-        let cpu = CpuEncoder::load_with(get)?;
+        let cpu = CpuEncoder::load_with(src)?;
         eprintln!(
             "[load] cpu encoder in {:.2}s",
             started.elapsed().as_secs_f32()
@@ -257,8 +255,7 @@ impl AsrInference {
         if self.cpu.is_some() {
             return Ok(());
         }
-        let src = TensorReader::open_model(&self.model_dir)?;
-        self.cpu = Some(Self::load_cpu(&|n| src.read(n))?);
+        self.cpu = Some(Self::load_cpu(crate::weights::open(&self.model_dir)?.as_ref())?);
         Ok(())
     }
 
@@ -312,20 +309,6 @@ impl AsrInference {
     ) -> Result<TranscribeResult> {
         crate::transcription::run(self, samples, None, &options)
     }
-}
-
-/// `lowbit.json` when the checkpoint stores dense weights as 4-bit codes.
-fn read_lowbit(model_dir: &Path) -> Result<std::collections::HashMap<String, u32>> {
-    let path = model_dir.join("lowbit.json");
-    if !path.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let map: std::collections::HashMap<String, u32> =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    eprintln!("[load] low-bit weights: {} tensors", map.len());
-    Ok(map)
 }
 
 /// The bundled mel filterbank, `[128, 257]` f32.

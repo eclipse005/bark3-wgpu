@@ -13,6 +13,7 @@
 //!   CPU-resident equivalent in `cpu` for the non-GPU backend
 //! - the reference check is byte-exact transcription (see `verify.ps1`)
 
+pub mod bark;
 pub mod cpu;
 pub mod encoder;
 pub mod gpu;
@@ -26,6 +27,7 @@ pub mod sub_gpu;
 pub mod tdt;
 pub mod tdt_gpu;
 pub mod transcript;
+pub mod weights;
 pub mod weights_io;
 
 mod transcription;

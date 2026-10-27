@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 
 use crate::raw::RawTensor;
+use crate::weights::WeightSource;
 use gemm::{PackW, pack_rows, round_to_f16};
 use layer::{CpuLayer, LnW, SEC_COUNT, Scratch};
 
@@ -42,13 +43,14 @@ fn f16v(t: &RawTensor) -> Vec<f32> {
 
 impl CpuEncoder {
     pub fn load(w: &HashMap<String, RawTensor>) -> Result<Self> {
-        Self::load_with(&|n| tensor(w, n).cloned())
+        Self::load_with(&crate::weights::from_map(w))
     }
 
-    /// `get` is called once per tensor and the tensor is dropped as soon as it
-    /// has been packed, so a streaming reader never has to hold the whole
+    /// `src` is asked for one tensor at a time and the result is dropped as soon
+    /// as it has been packed, so a streaming reader never has to hold the whole
     /// checkpoint — the difference between a 3.5 GB and a 2.4 GB peak.
-    pub fn load_with(get: &dyn Fn(&str) -> Result<RawTensor>) -> Result<Self> {
+    pub fn load_with(src: &dyn WeightSource) -> Result<Self> {
+        let get = |name: &str| src.read(name);
         let sub_w = pack_rows(
             &f16v(&get("encoder.subsampling.linear.weight")?),
             1024,

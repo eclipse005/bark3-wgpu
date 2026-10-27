@@ -19,6 +19,8 @@ serde_json = "1"
 hound = "3"
 rustfft = "6"
 anyhow = "1"
+constriction = "0.5"
+lzma-rs = "0.3"
 
 [profile.release]
 debug = false

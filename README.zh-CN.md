@@ -39,25 +39,18 @@ cargo build --release        # target/release/bark3
 
 ### 模型下载
 
-权重**不在**本仓库内（版权归原作者，CC-BY-4.0）。下载后把目录传给 `--model`：
+权重**不在**本仓库内（版权归原作者，CC-BY-4.0）。下载后把目录传给 `--model` 即可，不需要任何转换：
 
-| 模型 | 下载 | 说明 |
-|---|---:|---|
-| [Underdog-Bark-3.0-Pro](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Pro) | 1.25 GB | 全精度，精度最好 |
-| [Underdog-Bark-3.0-Plus](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Plus) | 180 MB | 低比特，最接近 Pro |
-| [Underdog-Bark-3.0](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0) | 163 MB | 低比特，下载最小 |
-| [Underdog-Bark-3.0-Clean](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Clean) | 180 MB | 低比特，自动去掉口头语与重复 |
+| 模型 | 下载 | 布局 | 说明 |
+|---|---:|---|---|
+| [Underdog-Bark-3.0-Pro](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Pro) | 1.25 GB | `model.safetensors`（bf16） | 全精度，精度最好 |
+| [Underdog-Bark-3.0-Plus](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Plus) | 180 MB | `model.bark` | 低比特，最接近 Pro |
+| [Underdog-Bark-3.0](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0) | 163 MB | `model.bark` | 低比特，下载最小 |
+| [Underdog-Bark-3.0-Clean](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Clean) | 180 MB | `model.bark` | 低比特，自动去掉口头语与重复 |
 
-Pro 直接是 `model.safetensors`，下载即可用；另外三个是压缩的 `model.bark` 容器，需要转换一次：
-
-```bash
-pip install numpy constriction safetensors
-python tools/encode_lowbit.py model.bark ../models/Underdog-Bark-3.0-Plus \
-    --reference ../models/Underdog-Bark-3.0-Pro
-```
-
-转换保留 4-bit 码与每行电平表，所以低比特权重只占约 380 MiB 显存（f16 展开是 1.2 GiB），
-并把发布名与容器 SHA-256 记到 `bark3.json`。
+压缩版把 encoder 线性层存成「每行 fp16 电平 + 4-bit 码」。加载器直接读这个容器、把码交给
+GEMM 的装载段展开，所以 163 MB 的下载只占约 380 MiB 显存（f16 展开要 1.2 GiB）。布局从头部
+自动识别，架构不匹配的 checkpoint 会在上传任何权重之前被拒绝。
 
 ### 快速上手
 

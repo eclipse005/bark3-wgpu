@@ -16,6 +16,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::too_many_arguments)]
 
+use crate::parallel::{SPLIT, num_threads};
 use rayon::prelude::*;
 
 /// Output columns per packed panel = one AVX2 register of f32.
@@ -238,7 +239,7 @@ pub fn gemm(a: &[f32], w: &PackW, c: &mut [f32], m: usize, n0: usize, ncols: usi
     // neighbours' columns. The attention score GEMMs have `ncols = frames`,
     // which is rarely a multiple of 128, and halving 125 gives 62 -> 31 -> a
     // silently wrong result for those frame counts.
-    let threads = rayon::current_num_threads().max(1);
+    let threads = num_threads();
     // `tm` is kept a multiple of `MR` (the micro-kernel's row tile) so a task
     // never ends on a partial micro tile; the remainder path is vectorised, but
     // a full tile is still the cheaper unit.
@@ -284,7 +285,7 @@ pub fn gemm(a: &[f32], w: &PackW, c: &mut [f32], m: usize, n0: usize, ncols: usi
     // Borrow the wrappers so the closure captures `&SendPtr` (which is `Sync`)
     // instead of the bare pointers.
     let (src, dst) = (&src, &dst);
-    tasks.par_iter().for_each(|t| {
+    let run = |t: &Task| {
         // SAFETY: tasks are disjoint `(row, column)` rectangles of `c`, and the
         // assertions above guarantee both buffers cover them.
         unsafe {
@@ -301,7 +302,12 @@ pub fn gemm(a: &[f32], w: &PackW, c: &mut [f32], m: usize, n0: usize, ncols: usi
                 k,
             );
         }
-    });
+    };
+    if SPLIT {
+        tasks.par_iter().for_each(run);
+    } else {
+        tasks.iter().for_each(run);
+    }
 }
 
 /// Rows / columns of one C tile.
@@ -349,7 +355,7 @@ pub fn gemm_split_k(
     ncols: usize,
 ) {
     let k = w.k;
-    let threads = rayon::current_num_threads().max(1);
+    let threads = num_threads();
     // Keep at least 64 k values per worker so the tile loop stays meaningful.
     let workers = threads.min(k.div_ceil(64)).max(1);
     if workers <= 1 || parts.len() < workers * m * ncols {
@@ -359,7 +365,7 @@ pub fn gemm_split_k(
     let src = SendPtr(a.as_ptr() as *mut f32);
     let dst = SendPtr(parts.as_mut_ptr());
     let (src, dst) = (&src, &dst);
-    (0..workers).into_par_iter().for_each(|wi| {
+    let run = |wi: usize| {
         let k0 = wi * chunk;
         let k1 = (k0 + chunk).min(k);
         if k0 >= k1 {
@@ -380,20 +386,32 @@ pub fn gemm_split_k(
                 k1,
             );
         }
-    });
+    };
+    if SPLIT {
+        (0..workers).into_par_iter().for_each(run);
+    } else {
+        (0..workers).for_each(run);
+    }
     let out = &mut c[..m * ncols];
-    out.par_chunks_mut(1024)
-        .enumerate()
-        .for_each(|(bi, chunk)| {
-            for (j, v) in chunk.iter_mut().enumerate() {
-                let i = bi * 1024 + j;
-                let mut acc = 0f32;
-                for wi in 0..workers {
-                    acc += parts[wi * m * ncols + i];
-                }
-                *v = acc;
+    let reduce = |bi: usize, chunk: &mut [f32]| {
+        for (j, v) in chunk.iter_mut().enumerate() {
+            let i = bi * 1024 + j;
+            let mut acc = 0f32;
+            for wi in 0..workers {
+                acc += parts[wi * m * ncols + i];
             }
-        });
+            *v = acc;
+        }
+    };
+    if SPLIT {
+        out.par_chunks_mut(1024)
+            .enumerate()
+            .for_each(|(bi, chunk)| reduce(bi, chunk));
+    } else {
+        out.chunks_mut(1024)
+            .enumerate()
+            .for_each(|(bi, chunk)| reduce(bi, chunk));
+    }
 }
 
 #[inline]

@@ -186,11 +186,22 @@ impl TdtDecoder {
             let xin: &[f32] = if layer == 0 { x } else { &h[0] };
             let hin = &h[layer];
             let mut gates = vec![0f32; GS];
-            gates.par_iter_mut().enumerate().for_each(|(row, out)| {
+            let gate = |row: usize, out: &mut f32| {
                 let wi = &wih[row * DH..(row + 1) * DH];
                 let wh = &whh[row * DH..(row + 1) * DH];
                 *out = bih[row] + bhh[row] + dot16(wi, xin, simd) + dot16(wh, hin, simd);
-            });
+            };
+            if crate::parallel::SPLIT {
+                gates
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(row, out)| gate(row, out));
+            } else {
+                gates
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(row, out)| gate(row, out));
+            }
             for channel in 0..DH {
                 let input = sigmoid(gates[channel]);
                 let forget = sigmoid(gates[DH + channel]);
@@ -217,27 +228,29 @@ impl TdtDecoder {
         let simd = Self::simd_ok();
         const CHUNKS: usize = 64;
         let per = rows.div_ceil(CHUNKS);
-        let partials: Vec<(f32, u32, f32, u32)> = (0..CHUNKS)
-            .into_par_iter()
-            .map(|chunk_index| {
-                let start = chunk_index * per;
-                let end = (start + per).min(rows);
-                let mut best_token = (f32::NEG_INFINITY, start as u32);
-                let mut best_duration = (f32::NEG_INFINITY, start as u32);
-                for row_index in start..end {
-                    let row = &self.head_w[row_index * DH..(row_index + 1) * DH];
-                    let score = self.head_b[row_index] + dot16(row, scratch, simd);
-                    if row_index < cfg::VOCAB {
-                        if score > best_token.0 {
-                            best_token = (score, row_index as u32);
-                        }
-                    } else if score > best_duration.0 {
-                        best_duration = (score, row_index as u32);
+        let partial_of = |chunk_index: usize| -> (f32, u32, f32, u32) {
+            let start = chunk_index * per;
+            let end = (start + per).min(rows);
+            let mut best_token = (f32::NEG_INFINITY, start as u32);
+            let mut best_duration = (f32::NEG_INFINITY, start as u32);
+            for row_index in start..end {
+                let row = &self.head_w[row_index * DH..(row_index + 1) * DH];
+                let score = self.head_b[row_index] + dot16(row, scratch, simd);
+                if row_index < cfg::VOCAB {
+                    if score > best_token.0 {
+                        best_token = (score, row_index as u32);
                     }
+                } else if score > best_duration.0 {
+                    best_duration = (score, row_index as u32);
                 }
-                (best_token.0, best_token.1, best_duration.0, best_duration.1)
-            })
-            .collect();
+            }
+            (best_token.0, best_token.1, best_duration.0, best_duration.1)
+        };
+        let partials: Vec<(f32, u32, f32, u32)> = if crate::parallel::SPLIT {
+            (0..CHUNKS).into_par_iter().map(partial_of).collect()
+        } else {
+            (0..CHUNKS).map(partial_of).collect()
+        };
         let mut best_token = (f32::NEG_INFINITY, 0u32);
         let mut best_duration = (f32::NEG_INFINITY, 0u32);
         for (token_score, token_id, duration_score, duration_id) in partials {
@@ -296,8 +309,10 @@ impl TdtDecoder {
     /// needs scoped threads; the browser build uses the GPU decoder instead (and
     /// refuses to load without an adapter, see `AsrInference::load_source`).
     #[cfg(target_arch = "wasm32")]
-    pub fn decode(&self, _pooler: &[f32], _t_len: usize) -> Vec<Token> {
-        panic!("the CPU TDT decoder needs threads; the browser build decodes on the GPU")
+    pub fn decode(&self, pooler: &[f32], t_len: usize) -> Vec<Token> {
+        // No threads in the browser: same arithmetic, one core, and the inner
+        // kernels take their serial branches because `parallel::SPLIT` is false.
+        self.decode_rayon(pooler, t_len)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -499,10 +514,17 @@ impl TdtDecoder {
     pub fn project(&self, x: &[f32]) -> Vec<f32> {
         let simd = Self::simd_ok();
         let mut out = vec![0f32; DH];
-        out.par_iter_mut().enumerate().for_each(|(row_index, y)| {
+        let row_of = |row_index: usize, y: &mut f32| {
             let row = &self.proj_w[row_index * DH..(row_index + 1) * DH];
             *y = self.proj_b[row_index] + dot16(row, x, simd);
-        });
+        };
+        if crate::parallel::SPLIT {
+            out.par_iter_mut()
+                .enumerate()
+                .for_each(|(i, y)| row_of(i, y));
+        } else {
+            out.iter_mut().enumerate().for_each(|(i, y)| row_of(i, y));
+        }
         out
     }
 }

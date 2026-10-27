@@ -222,10 +222,11 @@ impl AsrInference {
             Backend::Cpu
         };
         #[cfg(target_arch = "wasm32")]
-        anyhow::ensure!(
-            gpu.is_some(),
-            "no WebGPU adapter: the browser build decodes on the GPU and cannot fall back              to the CPU backend (it needs threads). Use a browser with WebGPU enabled."
-        );
+        if gpu.is_none() {
+            eprintln!(
+                "[gpu] no WebGPU adapter; running the CPU backend single-threaded                  (slow: the browser has no threads to give it)"
+            );
+        }
         eprintln!(
             "[load] {} backend in {:.2}s",
             backend.tag(),

@@ -9,6 +9,8 @@ use rayon::prelude::*;
 /// Rows above this count are worth handing to rayon.
 const PAR_MIN_ROWS: usize = 8;
 
+use crate::parallel::SPLIT;
+
 /// LayerNorm over `(rows, dim)` with f32 scale/bias.
 pub fn layer_norm(src: &[f32], dst: &mut [f32], w: &[f32], b: &[f32], rows: usize, dim: usize) {
     debug_assert_eq!(dim, 1024, "layer norm reduction is written for 1024");
@@ -40,7 +42,7 @@ pub fn layer_norm(src: &[f32], dst: &mut [f32], w: &[f32], b: &[f32], rows: usiz
             drow[i] = (x[i] - mean) * inv_std * w[i] + b[i];
         }
     };
-    if rows >= PAR_MIN_ROWS {
+    if SPLIT && rows >= PAR_MIN_ROWS {
         dst[..rows * dim]
             .par_chunks_mut(dim)
             .zip(src[..rows * dim].par_chunks(dim))
@@ -60,7 +62,7 @@ pub fn silu(x: &mut [f32]) {
             *v = *v / (1.0 + (-*v).exp());
         }
     };
-    if x.len() >= 4096 {
+    if SPLIT && x.len() >= 4096 {
         x.par_chunks_mut(4096).for_each(body);
     } else {
         body(x);
@@ -79,7 +81,7 @@ pub fn glu(src: &[f32], dst: &mut [f32], rows: usize, c: usize) {
             drow[i] = a / (1.0 + (-b).exp());
         }
     };
-    if rows >= PAR_MIN_ROWS {
+    if SPLIT && rows >= PAR_MIN_ROWS {
         dst[..rows * c]
             .par_chunks_mut(c)
             .enumerate()
@@ -99,7 +101,7 @@ pub fn add_scaled(a: &mut [f32], b: &[f32], scale: f32) {
             *x += scale * *y;
         }
     };
-    if a.len() >= 8192 {
+    if SPLIT && a.len() >= 8192 {
         a.par_chunks_mut(8192)
             .zip(b.par_chunks(8192))
             .for_each(|(x, y)| body(x, y));
@@ -115,7 +117,7 @@ pub fn add_bias(x: &mut [f32], bias: &[f32], rows: usize, dim: usize) {
             *v += *bv;
         }
     };
-    if rows >= PAR_MIN_ROWS {
+    if SPLIT && rows >= PAR_MIN_ROWS {
         x[..rows * dim].par_chunks_mut(dim).for_each(body);
     } else {
         x[..rows * dim].chunks_mut(dim).for_each(body);
@@ -173,7 +175,7 @@ pub fn rel_softmax_rows(
             *v /= sum;
         }
     };
-    if rows >= PAR_MIN_ROWS {
+    if SPLIT && rows >= PAR_MIN_ROWS {
         probs[..rows * t]
             .par_chunks_mut(t)
             .enumerate()
@@ -217,7 +219,7 @@ pub fn dwconv_bn_silu(
             *out = y / (1.0 + (-y).exp());
         }
     };
-    if rows >= PAR_MIN_ROWS {
+    if SPLIT && rows >= PAR_MIN_ROWS {
         dst[..rows * dim]
             .par_chunks_mut(dim)
             .enumerate()
@@ -257,7 +259,7 @@ pub fn pack_attention_inputs(
             v_h[j] = super::gemm::round_to_f16(qkv[q * 3072 + 2048 + b]);
         }
     };
-    if rows >= PAR_MIN_ROWS {
+    if SPLIT && rows >= PAR_MIN_ROWS {
         qu[..span]
             .par_chunks_mut(HDIM)
             .zip(qv[..span].par_chunks_mut(HDIM))

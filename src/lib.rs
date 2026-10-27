@@ -20,6 +20,7 @@ pub mod encoder;
 pub mod gpu;
 pub mod inference;
 pub mod mel;
+pub mod parallel;
 pub mod raw;
 pub mod segment;
 pub mod shaders;

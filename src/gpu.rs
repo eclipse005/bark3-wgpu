@@ -162,6 +162,31 @@ fn instance_for(backends: wgpu::Backends) -> wgpu::Instance {
 ///   the full enumeration would have made.  A machine whose Vulkan has only an
 ///   iGPU (or nothing) still walks on, because there D3D12 *can* change the
 ///   answer.
+/// The browser backend cannot enumerate adapters, so ask for one: the page gets
+/// the high-performance adapter, then the browser's own fallback (integrated, or
+/// software when nothing else exists).
+#[cfg(target_arch = "wasm32")]
+async fn adapters_for(selector: &DeviceSelector) -> Vec<wgpu::Adapter> {
+    let _ = selector;
+    let instance = instance_for(wgpu::Backends::BROWSER_WEBGPU);
+    let ask = |fallback: bool| wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: fallback,
+        compatible_surface: None,
+        ..Default::default()
+    };
+    match instance.request_adapter(&ask(false)).await {
+        Ok(adapter) => vec![adapter],
+        Err(_) => instance
+            .request_adapter(&ask(true))
+            .await
+            .ok()
+            .into_iter()
+            .collect(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn adapters_for(selector: &DeviceSelector) -> Vec<wgpu::Adapter> {
     match selector {
         DeviceSelector::Runtime { api, .. } => {
@@ -444,7 +469,11 @@ impl Gpu {
                 let mut hits: Vec<&wgpu::Adapter> = adapters
                     .iter()
                     .filter(|a| sel.matches(&a.get_info()))
-                    .filter(|a| !matches!(sel, DeviceSelector::Auto) || is_real_gpu(&a.get_info()))
+                    .filter(|a| {
+                        !matches!(sel, DeviceSelector::Auto)
+                            || cfg!(target_arch = "wasm32")
+                            || is_real_gpu(&a.get_info())
+                    })
                     .collect();
                 if hits.is_empty() {
                     let hint = if matches!(sel, DeviceSelector::Auto) {

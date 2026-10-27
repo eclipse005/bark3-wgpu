@@ -1,5 +1,6 @@
 //! One conformer block of the CPU encoder, mirroring `Encoder::encode_pre`.
 
+use crate::parallel::SPLIT;
 use rayon::prelude::*;
 
 use super::gemm::{PackW, gemm, gemm_split_k};
@@ -103,7 +104,7 @@ impl Scratch {
             // Window width is at most `t + BQ` rounded out to both panel edges.
             bd: vec![0.0; BQ * (t + BQ + 2 * PANEL)],
             attn_h: vec![0.0; BQ * HDIM],
-            av_parts: vec![0.0; rayon::current_num_threads().max(1) * BQ * HDIM],
+            av_parts: vec![0.0; crate::parallel::num_threads() * BQ * HDIM],
             kh_pack: packs(),
             vh_pack: packs(),
             rkh_pack: packs(),
@@ -208,21 +209,42 @@ impl CpuLayer {
         // `k` is consumed as the weight of the score GEMM, so it packs as an
         // (n = t, k = 128) row-major matrix; `v` is consumed on the k side of
         // the AV GEMM, so it packs as (k = t, n = 128).
-        kh_pack
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(h, w)| w.refill_rows(&kh[h * t * HDIM..], t, HDIM, false));
-        vh_pack
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(h, w)| w.refill_cols(&vh[h * t * HDIM..], HDIM, 0, HDIM, t, false));
+        if SPLIT {
+            kh_pack
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(h, w)| w.refill_rows(&kh[h * t * HDIM..], t, HDIM, false));
+        } else {
+            kh_pack
+                .iter_mut()
+                .enumerate()
+                .for_each(|(h, w)| w.refill_rows(&kh[h * t * HDIM..], t, HDIM, false));
+        }
+        if SPLIT {
+            vh_pack
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(h, w)| w.refill_cols(&vh[h * t * HDIM..], HDIM, 0, HDIM, t, false));
+        } else {
+            vh_pack
+                .iter_mut()
+                .enumerate()
+                .for_each(|(h, w)| w.refill_cols(&vh[h * t * HDIM..], HDIM, 0, HDIM, t, false));
+        }
         // Relative-position keys: relk_t[d][p] = relk[d] . pos[p], then rounded
         // through f16 like the GPU's f2h_mix does.
         gemm(&self.relk, pos, relk_t, HIDDEN, 0, pp);
-        rkh_pack
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(h, w)| w.refill_cols(&relk_t[h * HDIM * pp..], pp, 0, pp, HDIM, true));
+        if SPLIT {
+            rkh_pack
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(h, w)| w.refill_cols(&relk_t[h * HDIM * pp..], pp, 0, pp, HDIM, true));
+        } else {
+            rkh_pack
+                .iter_mut()
+                .enumerate()
+                .for_each(|(h, w)| w.refill_cols(&relk_t[h * HDIM * pp..], pp, 0, pp, HDIM, true));
+        }
         sec[SEC_PACK] += t0.elapsed().as_secs_f64();
 
         let t0 = crate::clock::now();

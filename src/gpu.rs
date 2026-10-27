@@ -754,6 +754,11 @@ impl Gpu {
         entry: &str,
         layout: Option<&wgpu::PipelineLayout>,
     ) -> Result<wgpu::ComputePipeline> {
+        // Native can block on the validation scope, which names the pipeline.
+        // The browser cannot: error scopes are a stack and popping them out of
+        // order panics inside wgpu, so there the validation error is left to
+        // `on_uncaptured_error`, which logs it to the console.
+        #[cfg(not(target_arch = "wasm32"))]
         let guard = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = self
             .device
@@ -771,25 +776,9 @@ impl Gpu {
                 compilation_options: Default::default(),
                 cache: None,
             });
-        // A browser cannot block on the device, so validation errors surface
-        // through wgpu's uncaptured-error handler there instead.
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let err = pollster::block_on(guard.pop());
-            if let Some(e) = err {
-                bail!("pipeline {label} failed validation: {e}");
-            }
-        }
-        // The browser cannot block, so the scope pops on the microtask queue;
-        // without this the first invalid pipeline is invisible in the console.
-        #[cfg(target_arch = "wasm32")]
-        {
-            let label = label.to_string();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(e) = guard.pop().await {
-                    crate::browser::log(&format!("[gpu] pipeline {label} failed validation: {e}"));
-                }
-            });
+        if let Some(e) = pollster::block_on(guard.pop()) {
+            bail!("pipeline {label} failed validation: {e}");
         }
         Ok(pipe)
     }

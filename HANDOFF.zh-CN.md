@@ -297,3 +297,34 @@ on             start 14.07 vs 14.15
 3. **分块自适应是安全的**：集显 `maxStorageBufferBindingSize` 只有独显的一半，编码器的 tile 选择会不同，但 20/20 假设逐字相同、门禁也逐字节通过。
 4. 跨设备精度完全一致（同一权重），差异只在速度——所以「集显能不能用」的答案是：能算对，但慢。
 
+
+---
+
+## 13. 2026-10-27 WebGPU 在独显上实测（Chrome → NVIDIA P104-100）
+
+按 §7 的注册表把 Chrome 的 GPU 偏好设成高性能后，`navigator.gpu.requestAdapter()` 拿到 `vendor=nvidia / architecture=pascal`。测试页面 `D:\bark3-demo\check\corpus.html`（一次加载模型、连续转 20 条），脚本 `corpus_run.py` + `compare_browser.py`。
+
+| 模型 | 15 s | 90 s | 180 s | 20 条语料 | 模型加载 |
+|---|---:|---:|---:|---:|---:|
+| Plus（low-bit） | 9.9x | 34.7x | 46.9x | **39–43x** | 11.2–11.6 s |
+| Pro（bf16） | 10.2x | 38.7x | 49.1x | **39–40x** | 3.2–3.4 s |
+| 原生同卡 Plus | 80.4x | 94.0x | 88.0x | 81.1x | 2–3 s |
+| 原生同卡 Pro | 97.7x | 103.2x | 90.1x | 85.3x | 3.5 s |
+
+精度（同一批 20 条）：
+
+| 模型 | 浏览器 WER / CER | 原生 WER / CER | 假设逐条相同 |
+|---|---|---|---|
+| Plus | 4.91% / 1.43% | 4.91% / 1.43% | **20/20** |
+| Pro | 4.58% / 1.41% | 4.58% / 1.41% | **20/20** |
+
+（Pro 单条 15 s 的 JSON 之前逐字节比过：完全一致；Plus 只差 3 个词的 80 ms 边界。）
+
+**怎么读这些数字**
+
+- 浏览器里 **15 s 那一列偏低**是因为每次开页都要重新编译管线 + 首次 dispatch：15 s 的片段要摊掉约 0.7 s 预热，180 s 的片段几乎不用摊。常驻页面（EggTranslate 那种）看 **39–49x** 才是稳态。
+- 浏览器约为原生同卡的一半（40x vs 85x），开销在 WebGPU 的提交/绑定与 JS 边界，不在算力。
+- 模型加载 11 s（Plus）是**容器解码**（ANS/lzma）而不是 GPU：OPFS 缓存能把二次加载降到 ~2 s（§8 待办 2）。
+
+**顺手修掉的一个 panic**：给 wasm 的 pipeline 校验错误加异步 `pop_error_scope` 之后，控制台开始出现 `pageerror: RuntimeError: unreachable`——wgpu 内部 `Mismatched pop_error_scope call`。错误作用域是**栈**，批量创建管线时异步 pop 会乱序。现在浏览器端不压栈，直接靠 `on_uncaptured_error` 打日志；原生仍用同步作用域并报出管线名。
+

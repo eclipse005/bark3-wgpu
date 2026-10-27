@@ -672,10 +672,17 @@ impl Gpu {
                 compilation_options: Default::default(),
                 cache: None,
             });
-        let err = pollster::block_on(guard.pop());
-        if let Some(e) = err {
-            bail!("pipeline {label} failed validation: {e}");
+        // A browser cannot block on the device, so validation errors surface
+        // through wgpu's uncaptured-error handler there instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let err = pollster::block_on(guard.pop());
+            if let Some(e) = err {
+                bail!("pipeline {label} failed validation: {e}");
+            }
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = guard;
         Ok(pipe)
     }
 }

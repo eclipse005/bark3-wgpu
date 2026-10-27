@@ -28,3 +28,6 @@ debug = false
 [[bin]]
 name = "bark3"
 path = "src/main.rs"
+
+[workspace]
+members = ["wasm"]

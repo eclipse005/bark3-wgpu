@@ -30,8 +30,15 @@ struct Entry {
     dtype: Option<safetensors::Dtype>,
 }
 
+/// Where the checkpoint bytes live: a file on disk (native) or one buffer that
+/// was fetched by the caller (wasm, and any caller that already holds the bytes).
+enum Backend {
+    Files(Vec<RefCell<File>>),
+    Memory(std::sync::Arc<Vec<u8>>),
+}
+
 pub struct TensorReader {
-    files: Vec<RefCell<File>>,
+    backend: Backend,
     entries: HashMap<String, Entry>,
 }
 
@@ -55,14 +62,27 @@ impl TensorReader {
             entries.extend(e);
             files.push(RefCell::new(file));
         }
-        Ok(Self { files, entries })
+        Ok(Self {
+            backend: Backend::Files(files),
+            entries,
+        })
     }
 
     /// Opens a single-file checkpoint.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let (entries, file) = read_shard(path, 0)?;
         Ok(Self {
-            files: vec![RefCell::new(file)],
+            backend: Backend::Files(vec![RefCell::new(file)]),
+            entries,
+        })
+    }
+
+    /// Reads a checkpoint that is already in memory — the entry point for the
+    /// wasm build, where the weights arrive as a `Uint8Array` rather than a path.
+    pub fn from_bytes(data: std::sync::Arc<Vec<u8>>) -> anyhow::Result<Self> {
+        let entries = parse_header(&data)?;
+        Ok(Self {
+            backend: Backend::Memory(data),
             entries,
         })
     }
@@ -77,13 +97,25 @@ impl TensorReader {
             .entries
             .get(name)
             .with_context(|| format!("missing tensor {name}"))?;
-        let mut data = vec![0u8; entry.len];
-        let mut file = self.files[entry.file].borrow_mut();
-        file.seek(SeekFrom::Start(entry.offset))
-            .map_err(|e| anyhow!("seek {name}: {e}"))?;
-        file.read_exact(&mut data)
-            .map_err(|e| anyhow!("read {name}: {e}"))?;
-        drop(file);
+        let data = match &self.backend {
+            Backend::Files(files) => {
+                let mut data = vec![0u8; entry.len];
+                let mut file = files[entry.file].borrow_mut();
+                file.seek(SeekFrom::Start(entry.offset))
+                    .map_err(|e| anyhow!("seek {name}: {e}"))?;
+                file.read_exact(&mut data)
+                    .map_err(|e| anyhow!("read {name}: {e}"))?;
+                drop(file);
+                data
+            }
+            Backend::Memory(bytes) => {
+                let start = entry.offset as usize;
+                bytes
+                    .get(start..start + entry.len)
+                    .with_context(|| format!("{name}: outside the buffer"))?
+                    .to_vec()
+            }
+        };
         Ok(RawTensor {
             data: Bytes::from(data),
             shape: entry.shape.clone(),
@@ -264,6 +296,53 @@ pub fn probe(model_dir: &Path) -> anyhow::Result<ModelInfo> {
         ffn,
         vocab,
     })
+}
+
+/// Parses a safetensors header from a byte slice (memory-backed checkpoints).
+fn parse_header(bytes: &[u8]) -> anyhow::Result<HashMap<String, Entry>> {
+    anyhow::ensure!(
+        bytes.len() >= 8,
+        "safetensors: file is shorter than its header"
+    );
+    let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    anyhow::ensure!(
+        header_len > 0 && header_len < (64 << 20) && 8 + header_len as usize <= bytes.len(),
+        "safetensors: header claims {header_len} bytes"
+    );
+    let meta: serde_json::Value = serde_json::from_slice(&bytes[8..8 + header_len as usize])?;
+    let base = 8 + header_len;
+    let mut entries = HashMap::new();
+    for (name, value) in meta.as_object().context("safetensors header")? {
+        if name == "__metadata__" {
+            continue;
+        }
+        let offset = value["data_offsets"][0].as_u64().unwrap_or(0) + base;
+        let end = value["data_offsets"][1].as_u64().unwrap_or(0) + base;
+        let shape: Vec<usize> = value["shape"]
+            .as_array()
+            .map(|d| d.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect())
+            .unwrap_or_default();
+        let dtype = match value["dtype"].as_str().unwrap_or("") {
+            "BF16" => Some(safetensors::Dtype::BF16),
+            "F16" => Some(safetensors::Dtype::F16),
+            "F32" => Some(safetensors::Dtype::F32),
+            "U32" => Some(safetensors::Dtype::U32),
+            "I64" => Some(safetensors::Dtype::I64),
+            "I32" => Some(safetensors::Dtype::I32),
+            _ => None,
+        };
+        entries.insert(
+            name.clone(),
+            Entry {
+                file: 0,
+                offset,
+                len: end.saturating_sub(offset) as usize,
+                shape,
+                dtype,
+            },
+        );
+    }
+    Ok(entries)
 }
 
 /// Parses one safetensors header and returns its tensors plus the open file.

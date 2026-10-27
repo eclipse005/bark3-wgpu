@@ -117,6 +117,36 @@ for segment in &out.segments {
 
 完整 API 见 `cargo doc`。
 
+### 浏览器（WebAssembly）
+
+`wasm/` 是浏览器绑定：同一套引擎编译到 `wasm32-unknown-unknown`，走 WebGPU（打不开时回退
+CPU encoder）。
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo build --release -p bark3-wasm --target wasm32-unknown-unknown
+# 再用 wasm-bindgen 处理 target/wasm32-unknown-unknown/release/bark3_wasm.wasm
+```
+
+```js
+import init, { BarkAsr } from "./bark3_wasm.js";
+await init();
+
+const bytes = new Uint8Array(await (await fetch(modelUrl)).arrayBuffer());
+const asr = await BarkAsr.create(bytes, "Underdog-Bark-3.0-Plus", "auto");
+
+// 16 kHz 单声道 f32，加上 VAD 给出的切点（每段静音的中点）：
+const out = JSON.parse(asr.transcribeChunked(samples16k, cuts));
+console.log(out.text, out.words.length);
+```
+
+返回的就是 CLI 那份文档——`text` / `duration` / `segments` / `words`，词时间是整段录音的
+时间轴，所以下游断句、翻译都不用改。`transcribe(samples)` 是整段一次解码；
+`transcribe_chunked` 对每个语音段各留 0.2 s 上下文，并保证每个词只归一个段。
+
+CI 会构建 wasm 目标。端到端验证需要 WebGPU，实用做法是开一个页面喂固定 WAV，把 JSON 和
+同一文件的 `bark3 transcribe` 输出逐字节比对：代码同源、只有设备不同，输出必须一致。
+
 ### 为什么选择 wgpu？
 
 本项目不依赖 CUDA / ROCm 等厂商专属运行时，而是用 **wgpu** 作为统一的 GPU 抽象

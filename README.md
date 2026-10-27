@@ -123,6 +123,41 @@ forced alignment.
 
 See `cargo doc` for the full API.
 
+### Browser (WebAssembly)
+
+`wasm/` holds the browser bindings: the same engine compiled for
+`wasm32-unknown-unknown`, using WebGPU (falling back to the CPU encoder).
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo build --release -p bark3-wasm --target wasm32-unknown-unknown
+# then run wasm-bindgen on target/wasm32-unknown-unknown/release/bark3_wasm.wasm
+```
+
+```js
+import init, { BarkAsr } from "./bark3_wasm.js";
+await init();
+
+const bytes = new Uint8Array(await (await fetch(modelUrl)).arrayBuffer());
+const asr = await BarkAsr.create(bytes, "Underdog-Bark-3.0-Plus", "auto");
+
+// 16 kHz mono f32 samples, plus the cut times a VAD produced (the midpoint of
+// each silence between two speech runs):
+const out = JSON.parse(asr.transcribeChunked(samples16k, cuts));
+console.log(out.text, out.words.length);
+```
+
+The result is the same document the CLI prints — `text`, `duration`, `segments`,
+`words` — with word times on the recording's timeline, so sentence splitting and
+translation downstream do not change. `transcribe(samples)` decodes one clip with
+no cuts; `transcribe_chunked` decodes each speech run with 0.2 s of context and
+gives every word to exactly one chunk.
+
+The wasm target is built in CI. Verifying it end to end needs WebGPU, so the
+practical gate is a page that feeds a known WAV and compares the JSON with
+`bark3 transcribe` on the same file: same code, different device, identical
+output.
+
 ### Why wgpu?
 
 Instead of relying on CUDA, ROCm or other vendor-specific runtimes, this project

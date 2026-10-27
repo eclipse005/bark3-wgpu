@@ -43,7 +43,13 @@ pub struct SafetensorsSource {
 
 impl SafetensorsSource {
     fn open(dir: &Path) -> Result<Self> {
-        let info = probe(dir)?;
+        let mut info = probe(dir)?;
+        // A safetensors checkpoint carries no release name; the directory is the
+        // name the official download unpacks into.
+        info.release = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty());
         let reader = TensorReader::open_model(dir)?;
         Ok(Self { reader, info })
     }
@@ -90,6 +96,45 @@ pub fn open(dir: &Path) -> Result<Box<dyn WeightSource>> {
             "{} has neither model.bark nor model.safetensors",
             dir.display()
         )
+    }
+}
+
+/// Opens a checkpoint that is already in memory (the wasm build, and callers that
+/// fetched the file themselves). The layout is sniffed from the bytes: a
+/// `model.bark` container starts with a JSON index carrying a `format` field.
+pub fn open_bytes(
+    data: std::sync::Arc<Vec<u8>>,
+    release: Option<String>,
+) -> Result<Box<dyn WeightSource>> {
+    let looks_like_container = data.len() > 8 && {
+        let len = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
+        len > 0
+            && len < (64 << 20)
+            && data.len() > 8 + len
+            && String::from_utf8_lossy(&data[8..(8 + len).min(data.len())]).contains("\"format\"")
+    };
+    if looks_like_container {
+        Ok(Box::new(BarkContainer::from_bytes(data, release)?))
+    } else {
+        Ok(Box::new(SafetensorsSource {
+            reader: TensorReader::from_bytes(data)?,
+            info: probe_bytes_placeholder(release),
+        }))
+    }
+}
+
+/// A safetensors buffer opened in memory: the header gives the layout, the
+/// architecture is checked by the loader itself.
+fn probe_bytes_placeholder(release: Option<String>) -> ModelInfo {
+    ModelInfo {
+        release,
+        layout: crate::weights_io::Layout::Bf16,
+        tensors: 0,
+        weights: 0,
+        layers: crate::cfg::LAYERS,
+        hidden: crate::cfg::HIDDEN,
+        ffn: crate::cfg::FFN,
+        vocab: crate::cfg::VOCAB,
     }
 }
 

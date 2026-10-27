@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -86,7 +86,7 @@ impl Entry {
 }
 
 pub struct BarkContainer {
-    file: File,
+    source: Source,
     entries: HashMap<String, Entry>,
     /// Decoded 4-bit tensors, filled by [`Self::prefetch`].
     cache: std::sync::Mutex<HashMap<String, std::sync::Arc<LowBitTensor>>>,
@@ -97,112 +97,72 @@ impl BarkContainer {
     /// Opens `<dir>/model.bark`.
     pub fn open(dir: &Path) -> Result<Self> {
         let path = dir.join("model.bark");
-        let mut file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
-        let mut len = [0u8; 8];
-        file.read_exact(&mut len)?;
-        let header_len = u64::from_le_bytes(len);
-        ensure!(
-            header_len > 0 && header_len < (64 << 20),
-            "{}: header claims {header_len} bytes",
-            path.display()
+        let file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
+        let mut reader = file
+            .try_clone()
+            .with_context(|| format!("clone {}", path.display()))?;
+        let header =
+            read_header(&mut reader).with_context(|| format!("{}: header", path.display()))?;
+        let entries = parse_index(&header, 8 + header.len() as u64)?;
+        let info = Self::describe(
+            &entries,
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()),
         );
-        let mut header = vec![0u8; header_len as usize];
-        file.read_exact(&mut header)?;
-        let head: serde_json::Value = serde_json::from_slice(&header)
-            .with_context(|| format!("{}: header is not JSON", path.display()))?;
-        let format = head["format"].as_str().unwrap_or("");
-        ensure!(
-            format == "bark-levels-v2" || format == "bark-levels-v3",
-            "{}: unsupported container format {format:?}",
-            path.display()
-        );
-
-        let mut entries = HashMap::new();
-        let mut offset = 8 + header_len;
-        for e in head["index"].as_array().context("container index")? {
-            let name = e["n"].as_str().context("tensor name")?.to_string();
-            let shape: Vec<usize> = e["shape"]
-                .as_array()
-                .context("tensor shape")?
-                .iter()
-                .map(|v| v.as_u64().unwrap_or(0) as usize)
-                .collect();
-            let kind = match e["k"].as_str().unwrap_or("") {
-                "levels2" => Kind::Levels2,
-                k if k.starts_with("ansint") => Kind::AnsInt {
-                    bits: k[6..].parse().with_context(|| format!("{name}: {k}"))?,
-                },
-                "raw" => Kind::Raw,
-                other => bail!("{name}: unsupported entry kind {other:?}"),
-            };
-            let field = |key: &str| e[key].as_u64().unwrap_or(0);
-            let flag = |key: &str| {
-                e.get(key)
-                    .map(|v| v.as_bool().unwrap_or_else(|| v.as_u64().unwrap_or(0) != 0))
-                    .unwrap_or(false)
-            };
-            let entry = Entry {
-                kind,
-                level_count: field("K") as u32,
-                shape,
-                offset,
-                lev: field("lev"),
-                meta: field("meta"),
-                words: field("b"),
-                scale: field("s"),
-                zipped_levels: flag("zl"),
-                zipped_scale: flag("zs"),
-                zipped_raw: flag("zr"),
-                raw_dtype: match e["dtype"].as_str().unwrap_or("") {
-                    "torch.int64" => safetensors::Dtype::I64,
-                    "torch.int32" => safetensors::Dtype::I32,
-                    _ => safetensors::Dtype::F16,
-                },
-            };
-            offset += entry.lev + entry.meta + entry.words + entry.scale;
-            entries.insert(name, entry);
-        }
-        let architecture = Self::architecture_of(&entries)
-            .with_context(|| format!("{}: not a Parakeet TDT container", path.display()))?;
-        let release = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.is_empty());
-        let info = crate::weights_io::ModelInfo {
-            release,
-            layout: crate::weights_io::Layout::LowBit,
-            tensors: entries.len(),
-            weights: Self::weight_count_of(&entries),
-            layers: architecture.0,
-            hidden: architecture.1,
-            ffn: architecture.2,
-            vocab: architecture.3,
-        };
         Ok(Self {
-            file,
+            source: Source::File(file),
             entries,
             cache: std::sync::Mutex::new(HashMap::new()),
             info,
         })
     }
 
+    /// Opens a container that is already in memory — the wasm entry point, where
+    /// the weights arrive as a fetched `Uint8Array`.
+    pub fn from_bytes(data: std::sync::Arc<Vec<u8>>, release: Option<String>) -> Result<Self> {
+        let header =
+            read_header(&mut std::io::Cursor::new(&data[..])).context("container header")?;
+        let entries = parse_index(&header, 8 + header.len() as u64)?;
+        let info = Self::describe(&entries, release);
+        Ok(Self {
+            source: Source::Memory(data),
+            entries,
+            cache: std::sync::Mutex::new(HashMap::new()),
+            info,
+        })
+    }
+
+    fn describe(
+        entries: &HashMap<String, Entry>,
+        release: Option<String>,
+    ) -> crate::weights_io::ModelInfo {
+        let architecture = Self::architecture_of(entries).unwrap_or((0, 0, 0, 0));
+        crate::weights_io::ModelInfo {
+            release,
+            layout: crate::weights_io::Layout::LowBit,
+            tensors: entries.len(),
+            weights: Self::weight_count_of(entries),
+            layers: architecture.0,
+            hidden: architecture.1,
+            ffn: architecture.2,
+            vocab: architecture.3,
+        }
+    }
+
+    /// What this container holds, read from its header at open time.
     pub fn info(&self) -> &crate::weights_io::ModelInfo {
         &self.info
     }
 
-    /// Logical weights: a packed code word counts as its eight 4-bit symbols.
+    /// Logical weights: every entry's element count (4-bit tensors included as
+    /// the logical shape the header records).
     fn weight_count_of(entries: &HashMap<String, Entry>) -> u64 {
         entries
             .values()
-            .map(|e| match e.kind {
-                Kind::Levels2 => e.n() as u64,
-                _ => e.n() as u64,
+            .filter(|e| {
+                e.raw_dtype != safetensors::Dtype::I64 && e.raw_dtype != safetensors::Dtype::I32
             })
+            .map(|e| e.n() as u64)
             .sum()
-    }
-
-    pub fn weight_count(&self) -> u64 {
-        self.info.weights
     }
 
     /// Tensor names, in container order is not kept; sorted for stable logs.
@@ -249,12 +209,24 @@ impl BarkContainer {
         if len == 0 {
             return Ok(Vec::new());
         }
-        // Positional read: `prefetch` reads tensors from several threads, and a
-        // shared cursor (or a cloned handle, which shares it on Windows) would
-        // hand each of them someone else's bytes.
-        let mut buf = vec![0u8; len as usize];
-        read_at(&self.file, &mut buf, offset).context("read container blob")?;
-        Ok(buf)
+        match &self.source {
+            Source::Memory(bytes) => {
+                let start = offset as usize;
+                bytes
+                    .get(start..start + len as usize)
+                    .context("blob outside the buffer")?
+                    .to_vec()
+                    .pipe(Ok)
+            }
+            Source::File(file) => {
+                // Positional read: `prefetch` reads tensors from several threads,
+                // and a shared cursor (or a cloned handle, which shares it on
+                // Windows) would hand each of them someone else's bytes.
+                let mut buf = vec![0u8; len as usize];
+                read_at(file, &mut buf, offset).context("read container blob")?;
+                Ok(buf)
+            }
+        }
     }
 
     fn entry(&self, name: &str) -> Result<&Entry> {
@@ -305,7 +277,7 @@ impl BarkContainer {
     fn decode_levels2(&self, name: &str, e: &Entry) -> Result<LowBitTensor> {
         let (rows, cols) = e.rows_cols();
         let k = e.level_count as usize;
-        ensure!(k >= 1 && k <= 3, "{name}: unsupported level count {k}");
+        ensure!((1..=3).contains(&k), "{name}: unsupported level count {k}");
         let levels_bytes = self.field(e, 0, e.lev, e.zipped_levels)?;
         ensure!(
             levels_bytes.len() == rows * k * 2,
@@ -507,6 +479,93 @@ impl BarkContainer {
         Ok(())
     }
 }
+
+/// Where the container bytes live.
+enum Source {
+    File(File),
+    /// Fetched by the caller (the wasm build): the whole `model.bark` in memory.
+    Memory(std::sync::Arc<Vec<u8>>),
+}
+
+/// Reads and validates the container header, returning its raw JSON bytes.
+fn read_header(reader: &mut (impl Read + Seek)) -> Result<Vec<u8>> {
+    let mut len = [0u8; 8];
+    reader.seek(std::io::SeekFrom::Start(0))?;
+    reader.read_exact(&mut len)?;
+    let header_len = u64::from_le_bytes(len);
+    ensure!(
+        header_len > 0 && header_len < (64 << 20),
+        "header claims {header_len} bytes"
+    );
+    let mut header = vec![0u8; header_len as usize];
+    reader.read_exact(&mut header)?;
+    let head: serde_json::Value = serde_json::from_slice(&header).context("header is not JSON")?;
+    let format = head["format"].as_str().unwrap_or("");
+    ensure!(
+        format == "bark-levels-v2" || format == "bark-levels-v3",
+        "unsupported container format {format:?}"
+    );
+    Ok(header)
+}
+
+/// Turns the JSON index into per-tensor entries, starting at `base` bytes.
+fn parse_index(header: &[u8], base: u64) -> Result<HashMap<String, Entry>> {
+    let head: serde_json::Value = serde_json::from_slice(header)?;
+    let mut entries = HashMap::new();
+    let mut offset = base;
+    for e in head["index"].as_array().context("container index")? {
+        let name = e["n"].as_str().context("tensor name")?.to_string();
+        let shape: Vec<usize> = e["shape"]
+            .as_array()
+            .context("tensor shape")?
+            .iter()
+            .map(|v| v.as_u64().unwrap_or(0) as usize)
+            .collect();
+        let kind = match e["k"].as_str().unwrap_or("") {
+            "levels2" => Kind::Levels2,
+            k if k.starts_with("ansint") => Kind::AnsInt {
+                bits: k[6..].parse().with_context(|| format!("{name}: {k}"))?,
+            },
+            "raw" => Kind::Raw,
+            other => bail!("{name}: unsupported entry kind {other:?}"),
+        };
+        let field = |key: &str| e[key].as_u64().unwrap_or(0);
+        let flag = |key: &str| {
+            e.get(key)
+                .map(|v| v.as_bool().unwrap_or_else(|| v.as_u64().unwrap_or(0) != 0))
+                .unwrap_or(false)
+        };
+        let entry = Entry {
+            kind,
+            level_count: field("K") as u32,
+            shape,
+            offset,
+            lev: field("lev"),
+            meta: field("meta"),
+            words: field("b"),
+            scale: field("s"),
+            zipped_levels: flag("zl"),
+            zipped_scale: flag("zs"),
+            zipped_raw: flag("zr"),
+            raw_dtype: match e["dtype"].as_str().unwrap_or("") {
+                "torch.int64" => safetensors::Dtype::I64,
+                "torch.int32" => safetensors::Dtype::I32,
+                _ => safetensors::Dtype::F16,
+            },
+        };
+        offset += entry.lev + entry.meta + entry.words + entry.scale;
+        entries.insert(name, entry);
+    }
+    Ok(entries)
+}
+
+/// `x.pipe(f)` — keeps the read path a one-liner in both branches.
+trait Pipe: Sized {
+    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
 
 /// Reads `buf.len()` bytes at `offset` without moving the file cursor.
 #[cfg(unix)]

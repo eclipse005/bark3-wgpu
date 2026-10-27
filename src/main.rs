@@ -81,8 +81,8 @@ fn take_model(args: &mut Vec<String>) -> Result<PathBuf> {
         }
     };
     anyhow::ensure!(
-        dir.join("model.safetensors").is_file(),
-        "{} does not contain model.safetensors",
+        dir.join("model.safetensors").is_file() || dir.join("model.bark").is_file(),
+        "{} holds neither model.safetensors nor model.bark",
         dir.display()
     );
     Ok(dir)

@@ -174,9 +174,23 @@ impl AsrInference {
     /// converted first, and nothing is guessed: the header is read, the
     /// architecture is checked against this build, and only then are weights
     /// uploaded.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(model_dir: impl AsRef<Path>, backend: Backend) -> Result<Self> {
         let model_dir = model_dir.as_ref().to_path_buf();
         let src = crate::weights::open(&model_dir)?;
+        let mut asr = pollster::block_on(Self::load_source(src, backend))?;
+        // Diagnostics reopen the directory to build the second encoder.
+        asr.model_dir = model_dir;
+        Ok(asr)
+    }
+
+    /// Async loader over an explicit source: the entry point for the wasm build,
+    /// where the weights are fetched into memory instead of read from a path.
+    pub async fn load_source(
+        src: Box<dyn crate::weights::WeightSource>,
+        backend: Backend,
+    ) -> Result<Self> {
+        let model_dir = PathBuf::new();
         let info = src.info().clone();
         info.check_architecture()?;
         eprintln!("[model] {}", info.summary());
@@ -188,8 +202,8 @@ impl AsrInference {
 
         let gpu = match backend {
             Backend::Cpu => None,
-            Backend::Gpu => Some(Self::load_gpu(src.as_ref(), &tdt, &sub_w)?),
-            Backend::Auto => match Self::load_gpu(src.as_ref(), &tdt, &sub_w) {
+            Backend::Gpu => Some(Self::load_gpu(src.as_ref(), &tdt, &sub_w).await?),
+            Backend::Auto => match Self::load_gpu(src.as_ref(), &tdt, &sub_w).await {
                 Ok(gpu) => Some(gpu),
                 Err(err) => {
                     eprintln!("[gpu] unavailable ({err:#}); falling back to the CPU backend");
@@ -225,12 +239,12 @@ impl AsrInference {
         })
     }
 
-    fn load_gpu(
+    async fn load_gpu(
         src: &dyn WeightSource,
         tdt: &TdtDecoder,
         sub_w: &SubsamplingWeights,
     ) -> Result<GpuState> {
-        let gpu = pollster::block_on(Gpu::new_with(DeviceSelector::Auto))?;
+        let gpu = Gpu::new_with(DeviceSelector::Auto).await?;
         eprintln!("[gpu] {}", gpu.describe());
         let enc = Encoder::load_with(gpu, src)?;
         let decode = GpuTdtDecoder::new(&enc.gpu, tdt)?;
@@ -246,6 +260,88 @@ impl AsrInference {
             started.elapsed().as_secs_f32()
         );
         Ok(cpu)
+    }
+
+    /// Transcribes audio that a VAD split into speech runs, and returns one
+    /// timeline for the whole recording.
+    ///
+    /// `cuts` are absolute times in seconds — typically the *midpoints of the
+    /// silences* between speech runs. Each chunk is decoded with `PAD` seconds of
+    /// context on both sides so a word that starts on the boundary is not clipped,
+    /// then a word is kept by exactly one chunk: whichever span contains its
+    /// midpoint. Word times are shifted to the recording's timeline, so the result
+    /// has the same shape (and the same JSON) as a single-pass transcription.
+    ///
+    /// This is what the browser build feeds: one call per recording, after the
+    /// VAD has decided where the silences are.
+    pub fn transcribe_chunked(
+        &self,
+        samples: &[f32],
+        cuts: &[f32],
+        options: TranscribeOptions,
+    ) -> Result<TranscribeResult> {
+        /// Context on each side of a cut, so boundary words decode in full.
+        const PAD: f32 = 0.20;
+        let duration = samples.len() as f32 / SAMPLE_RATE as f32;
+        let mut edges: Vec<f32> = cuts
+            .iter()
+            .copied()
+            .filter(|c| *c > 0.0 && *c < duration)
+            .collect();
+        edges.sort_by(f32::total_cmp);
+        edges.dedup();
+        if edges.is_empty() {
+            return self.transcribe_samples(samples, options);
+        }
+
+        let mut bounds = Vec::with_capacity(edges.len() + 1);
+        let mut start = 0.0f32;
+        for edge in edges {
+            bounds.push((start, edge));
+            start = edge;
+        }
+        bounds.push((start, duration));
+
+        let frame_of = |seconds: f32| (seconds / crate::transcript::FRAME_SECONDS).round() as u32;
+        let mut words = Vec::new();
+        let mut tokens = Vec::new();
+        let mut texts = Vec::new();
+        for (from, to) in bounds {
+            let lo = (from - PAD).max(0.0);
+            let hi = (to + PAD).min(duration);
+            let a = (lo * SAMPLE_RATE as f32) as usize;
+            let b = ((hi * SAMPLE_RATE as f32) as usize).min(samples.len());
+            if b <= a {
+                continue;
+            }
+            let chunk = self.transcribe_samples(&samples[a..b], options)?;
+            if !chunk.text.is_empty() {
+                texts.push(chunk.text);
+            }
+            let frame_base = frame_of(lo);
+            for token in chunk.tokens {
+                let frame = token.frame + frame_base;
+                if frame >= frame_of(from) && frame < frame_of(to) {
+                    tokens.push(crate::tdt::Token { frame, ..token });
+                }
+            }
+            for mut word in chunk.words {
+                word.start += lo;
+                word.end = (word.end + lo).min(duration);
+                let middle = 0.5 * (word.start + word.end);
+                if middle >= from && middle < to {
+                    words.push(word);
+                }
+            }
+        }
+        words.sort_by(|a, b| a.start.total_cmp(&b.start));
+        Ok(TranscribeResult {
+            text: texts.join(" "),
+            segments: crate::segment::words_to_segments(&words, duration, &options.segments),
+            words,
+            tokens,
+            duration,
+        })
     }
 
     /// Build the CPU encoder in addition to whatever is already loaded, so the

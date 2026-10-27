@@ -12,7 +12,7 @@ pub mod ops;
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::raw::RawTensor;
 use crate::weights::WeightSource;
@@ -28,11 +28,6 @@ pub struct CpuEncoder {
     layers: Vec<CpuLayer>,
     proj_w: PackW,
     proj_b: Vec<f32>,
-}
-
-fn tensor<'a>(w: &'a HashMap<String, RawTensor>, name: &str) -> Result<&'a RawTensor> {
-    w.get(name)
-        .with_context(|| format!("missing tensor {name}"))
 }
 
 /// Checkpoint bf16 -> f16 -> f32: the same rounding the GPU storage path

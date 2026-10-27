@@ -25,6 +25,20 @@ jobs:
       # weight widening, transcript assembly and segmentation.
       - run: cargo test --release
 
+  wasm:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # Browser bindings: the same engine compiled for wasm32. Tests need a GPU,
+      # so CI only proves that the target, the crate and the JS entry points build.
+      - run: cargo build --release -p bark3-wasm --target wasm32-unknown-unknown
+      - run: cargo check --target wasm32-unknown-unknown --all-targets
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest

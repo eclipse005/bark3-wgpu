@@ -144,8 +144,12 @@ console.log(out.text, out.words.length);
 时间轴，所以下游断句、翻译都不用改。`transcribe(samples)` 是整段一次解码；
 `transcribe_chunked` 对每个语音段各留 0.2 s 上下文，并保证每个词只归一个段。
 
-CI 会构建 wasm 目标。端到端验证需要 WebGPU，实用做法是开一个页面喂固定 WAV，把 JSON 和
+浏览器版需要 WebGPU 适配器；拿不到就直接报错，不会偷偷跑 CPU encoder（wasm32 没有线程，
+CPU 那条路本来也跑不了）。CI 会构建 wasm 目标；端到端门禁是一个页面喂固定 WAV，把 JSON 和
 同一文件的 `bark3 transcribe` 输出逐字节比对：代码同源、只有设备不同，输出必须一致。
+
+**VAD 不在这个 crate 里**：切点时间只是输入。配任何能给出"静音中点"的 VAD（同系列的
+silero-rs 移植也带浏览器绑定），把 cuts 交给 `transcribeChunked` 即可。
 
 ### 为什么选择 wgpu？
 

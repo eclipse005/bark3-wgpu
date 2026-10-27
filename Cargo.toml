@@ -21,6 +21,7 @@ rustfft = "6"
 anyhow = "1"
 constriction = "0.5"
 lzma-rs = "0.3"
+web-time = "1"
 
 [profile.release]
 debug = false

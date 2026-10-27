@@ -75,6 +75,7 @@ impl BarkAsr {
     /// `cuts` are absolute times in seconds; the natural choice is the midpoint of
     /// each silence between two speech runs. Word times come back on the
     /// recording's timeline, in one JSON document.
+    #[wasm_bindgen(js_name = transcribeChunked)]
     pub fn transcribe_chunked(&self, samples: &[f32], cuts: &[f32]) -> Result<String, JsError> {
         self.inner
             .transcribe_chunked(samples, cuts, TranscribeOptions::default())
@@ -83,6 +84,7 @@ impl BarkAsr {
     }
 
     /// What was loaded: release name, weight layout, parameter count, architecture.
+    #[wasm_bindgen(js_name = modelInfo)]
     pub fn model_info(&self) -> String {
         let info = self.inner.model_info();
         serde_json::json!({
@@ -110,6 +112,7 @@ impl BarkAsr {
     /// Largest audio this instance accepts, in seconds. The encoder pads to whole
     /// frames and its positional embedding reaches 5000 frames (400 s); the page
     /// should cut long recordings with the VAD instead of relying on this.
+    #[wasm_bindgen(js_name = maxSeconds)]
     pub fn max_seconds() -> f32 {
         400.0
     }

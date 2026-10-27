@@ -592,7 +592,7 @@ impl SubGpu {
         let t_real = t2;
 
         let prof = std::env::var("BARK3_SUBG_TIME").is_ok();
-        let ta = std::time::Instant::now();
+        let ta = crate::clock::now();
         let mel_b = g.storage("sub_mel", (mel.len() * 4) as u64);
         g.upload(&mel_b, bytemuck::cast_slice(mel));
 
@@ -615,25 +615,25 @@ impl SubGpu {
                 ta.elapsed().as_secs_f32()
             );
         }
-        let ta2 = std::time::Instant::now();
+        let ta2 = crate::clock::now();
         let p_conv = f1 * m1;
         let patch = g.storage("sub_patch", (16 * p_conv * 4) as u64);
         let mut enc = g.device.create_command_encoder(&Default::default());
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         self.im2col_dispatch(g, &mut enc, &mel_b, &patch, f, f1, m1, p_conv);
         if prof {
             g.queue.submit([enc.finish()]);
             g.device.poll(wgpu::PollType::wait_indefinitely())?;
             eprintln!("[subg] im2col#1 {:.3}s", t0.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
-            let t9 = std::time::Instant::now();
+            let t9 = crate::clock::now();
             self.im2col_dispatch(g, &mut enc, &mel_b, &patch, f, f1, m1, p_conv);
             g.queue.submit([enc.finish()]);
             g.device.poll(wgpu::PollType::wait_indefinitely())?;
             eprintln!("[subg] im2col#2 {:.3}s", t9.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
-        let tc = std::time::Instant::now();
+        let tc = crate::clock::now();
         self.pw_dispatch(
             g,
             &mut enc,
@@ -655,7 +655,7 @@ impl SubGpu {
             enc = g.device.create_command_encoder(&Default::default());
         }
         Self::dump_stage(g, "x1b", &x1, (256 * p_conv * 4) as u64);
-        let t1s = std::time::Instant::now();
+        let t1s = crate::clock::now();
         self.dw_dispatch(
             g, &mut enc, &x1, &x2, &self.w_l2, &self.b_l2, f1, m1, t1, m2, v1, p1,
         );
@@ -665,7 +665,7 @@ impl SubGpu {
             eprintln!("[subg] dw1 {:.3}s", t1s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
-        let t2s = std::time::Instant::now();
+        let t2s = crate::clock::now();
         self.pw_dispatch(
             g,
             &mut enc,
@@ -684,7 +684,7 @@ impl SubGpu {
             eprintln!("[subg] pw1 {:.3}s", t2s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
-        let t3s = std::time::Instant::now();
+        let t3s = crate::clock::now();
         self.dw_dispatch(
             g, &mut enc, &x3, &x4, &self.w_l5, &self.b_l5, t1, m2, t2, m3, v2, p2,
         );
@@ -694,7 +694,7 @@ impl SubGpu {
             eprintln!("[subg] dw2 {:.3}s", t3s.elapsed().as_secs_f32());
             enc = g.device.create_command_encoder(&Default::default());
         }
-        let t4s = std::time::Instant::now();
+        let t4s = crate::clock::now();
         self.pw_dispatch(
             g,
             &mut enc,

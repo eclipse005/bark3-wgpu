@@ -291,6 +291,16 @@ impl TdtDecoder {
     }
 
     /// Greedy decode over pooler output (T x 640).
+    ///
+    /// The decoder is a spin-pool over the LSTM gates and the joint head, which
+    /// needs scoped threads; the browser build uses the GPU decoder instead (and
+    /// refuses to load without an adapter, see `AsrInference::load_source`).
+    #[cfg(target_arch = "wasm32")]
+    pub fn decode(&self, _pooler: &[f32], _t_len: usize) -> Vec<Token> {
+        panic!("the CPU TDT decoder needs threads; the browser build decodes on the GPU")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn decode(&self, pooler: &[f32], t_len: usize) -> Vec<Token> {
         if std::env::var("BARK3_RAYON_DEC").is_ok() {
             return self.decode_rayon(pooler, t_len);

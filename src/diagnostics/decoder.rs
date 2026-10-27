@@ -137,11 +137,11 @@ pub fn gpu_pool_decode_test(asr: &AsrInference, golden: &std::path::Path) -> Res
     let pool = gpu.storage("torch_pooler", pool_host.len() as u64 * 4);
     gpu.upload(&pool, bytemuck::cast_slice(&pool_host));
 
-    let started = std::time::Instant::now();
+    let started = bark3_pro_wgpu::clock::now();
     let decoded = asr.gpu()?.decode.decode(gpu, &pool, t_len)?;
     let gpu_time = started.elapsed().as_secs_f32();
 
-    let started = std::time::Instant::now();
+    let started = bark3_pro_wgpu::clock::now();
     let cpu_tokens = asr.tdt.decode(&pool_host, t_len);
     let cpu_time = started.elapsed().as_secs_f32();
 

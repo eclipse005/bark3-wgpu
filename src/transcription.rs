@@ -39,11 +39,11 @@ pub(crate) fn run(
     padded.append(&mut wave);
     let wave = &padded;
 
-    let t0 = std::time::Instant::now();
+    let t0 = crate::clock::now();
     let feats = mel_fe.compute(wave);
     let t_mel = t0.elapsed().as_secs_f32();
 
-    let t1 = std::time::Instant::now();
+    let t1 = crate::clock::now();
     let dump_layer_env: Option<usize> = std::env::var("BARK3_DUMP_L")
         .ok()
         .and_then(|v| v.parse().ok());
@@ -59,7 +59,7 @@ pub(crate) fn run(
         let sub_rows = subsample(sub_w, &feats.frames, feats.n_valid);
         let t = sub_rows.len() / 4096;
         let t_sub = t1.elapsed().as_secs_f32();
-        let t2 = std::time::Instant::now();
+        let t2 = crate::clock::now();
         let pooler = cpu.encode(&sub_rows, t, 24);
         let t_enc = t2.elapsed().as_secs_f32();
         let out = EncodeOut {
@@ -76,7 +76,7 @@ pub(crate) fn run(
             std::fs::write("data/dump_sub_cpu.bin", bytemuck::cast_slice(&sub_rows)).ok();
         }
         let t_sub = t1.elapsed().as_secs_f32();
-        let t2 = std::time::Instant::now();
+        let t2 = crate::clock::now();
         let out = enc.encode(&sub_rows, t, dl)?;
         (out, t, t_sub, t2.elapsed().as_secs_f32())
     } else {
@@ -97,7 +97,7 @@ pub(crate) fn run(
             );
         }
         let t_sub = t1.elapsed().as_secs_f32();
-        let t2 = std::time::Instant::now();
+        let t2 = crate::clock::now();
         let out = enc.encode_pre(&buf, t, dl, want_pool)?;
         if use_gpu_decoder && !dump_pool {
             // The GPU decoder waits on this queue anyway; drain it here so the
@@ -182,7 +182,7 @@ pub(crate) fn run(
         }
     }
 
-    let t3 = std::time::Instant::now();
+    let t3 = crate::clock::now();
     let tokens = if use_gpu_decoder {
         let gpu = gpu.as_ref().context("wgpu backend missing")?;
         let pooler = out

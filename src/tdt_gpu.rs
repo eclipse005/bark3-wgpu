@@ -202,7 +202,7 @@ impl GpuTdtDecoder {
                 stats: GpuDecodeStats::default(),
             });
         }
-        let decode_started = std::time::Instant::now();
+        let decode_started = crate::clock::now();
         let max_steps = t_len
             .saturating_mul(cfg::MAX_SYMBOLS as usize + 4)
             .saturating_add(64);
@@ -312,7 +312,7 @@ impl GpuTdtDecoder {
             } else {
                 0
             };
-            let record_started = std::time::Instant::now();
+            let record_started = crate::clock::now();
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             if is_first_chunk {
                 encoder.copy_buffer_to_buffer(
@@ -388,7 +388,7 @@ impl GpuTdtDecoder {
             record_seconds += record_started.elapsed().as_secs_f32();
             chunks += 1;
 
-            let wait_started = std::time::Instant::now();
+            let wait_started = crate::clock::now();
             let bytes = gpu.readback(&result, result_bytes)?;
             wait_seconds += wait_started.elapsed().as_secs_f32();
             let header = result_header(&bytes);

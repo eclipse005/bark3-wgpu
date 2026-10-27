@@ -405,7 +405,7 @@ pub fn gemm_bench(enc: &Encoder) -> Result<()> {
                 }
             }
         }
-        let started = std::time::Instant::now();
+        let started = bark3_pro_wgpu::clock::now();
         g.queue.submit([e2.finish()]);
         g.device.poll(wgpu::PollType::wait_indefinitely())?;
         let elapsed = started.elapsed().as_secs_f64();

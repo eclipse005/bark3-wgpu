@@ -194,7 +194,7 @@ impl AsrInference {
         let info = src.info().clone();
         info.check_architecture()?;
         eprintln!("[model] {}", info.summary());
-        let started = std::time::Instant::now();
+        let started = crate::clock::now();
 
         let get = |n: &str| src.read(n);
         let tdt = TdtDecoder::from_source(&get)?;
@@ -221,6 +221,11 @@ impl AsrInference {
         } else {
             Backend::Cpu
         };
+        #[cfg(target_arch = "wasm32")]
+        anyhow::ensure!(
+            gpu.is_some(),
+            "no WebGPU adapter: the browser build decodes on the GPU and cannot fall back              to the CPU backend (it needs threads). Use a browser with WebGPU enabled."
+        );
         eprintln!(
             "[load] {} backend in {:.2}s",
             backend.tag(),
@@ -253,7 +258,7 @@ impl AsrInference {
     }
 
     fn load_cpu(src: &dyn WeightSource) -> Result<CpuEncoder> {
-        let started = std::time::Instant::now();
+        let started = crate::clock::now();
         let cpu = CpuEncoder::load_with(src)?;
         eprintln!(
             "[load] cpu encoder in {:.2}s",

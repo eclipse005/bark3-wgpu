@@ -53,43 +53,52 @@ impl MelFrontend {
         // power spectrum per frame, real FFT of size 512 (257 bins), center-padded
         let mut plans = rustfft::FftPlanner::<f32>::new();
         let fft = plans.plan_fft_forward(N_FFT);
-        let spectra: Vec<Vec<f32>> = (0..n_frames)
-            .into_par_iter()
-            .map(|t| {
-                let mut buf = vec![rustfft::num_complex::Complex::new(0.0, 0.0); N_FFT];
-                let start = t as isize * HOP as isize - N_FFT as isize / 2; // center=True, zero pad
-                for (i, value) in buf.iter_mut().enumerate() {
-                    let s = start + i as isize;
-                    if s >= 0 && (s as usize) < wave.len() {
-                        *value = rustfft::num_complex::Complex {
-                            re: wave[s as usize] * self.window[i],
-                            im: 0.0,
-                        };
-                    }
+        let frame_spectrum = |t: usize| -> Vec<f32> {
+            let mut buf = vec![rustfft::num_complex::Complex::new(0.0, 0.0); N_FFT];
+            let start = t as isize * HOP as isize - N_FFT as isize / 2; // center=True, zero pad
+            for (i, value) in buf.iter_mut().enumerate() {
+                let s = start + i as isize;
+                if s >= 0 && (s as usize) < wave.len() {
+                    *value = rustfft::num_complex::Complex {
+                        re: wave[s as usize] * self.window[i],
+                        im: 0.0,
+                    };
                 }
-                fft.process(&mut buf);
-                (0..257).map(|k| buf[k].norm_sqr()).collect::<Vec<f32>>()
-            })
-            .collect();
+            }
+            fft.process(&mut buf);
+            (0..257).map(|k| buf[k].norm_sqr()).collect::<Vec<f32>>()
+        };
+        // Frames are independent; native runs them in parallel, and wasm has no
+        // threads to run them on.
+        #[cfg(not(target_arch = "wasm32"))]
+        let spectra: Vec<Vec<f32>> = (0..n_frames).into_par_iter().map(frame_spectrum).collect();
+        #[cfg(target_arch = "wasm32")]
+        let spectra: Vec<Vec<f32>> = (0..n_frames).map(frame_spectrum).collect();
 
         // mel (128, n_frames): filters @ power — parallel over mel rows
         let mut mel = vec![0f32; cfg::MEL_BINS * n_frames];
         let powers: Vec<&[f32]> = spectra.iter().map(|v| v.as_slice()).collect();
+        let mel_row = |m: usize, out: &mut [f32]| {
+            let row = &self.mel_filters[m * 257..(m + 1) * 257];
+            for t in 0..n_frames {
+                let power = powers[t];
+                let mut s = 0f32;
+                for k in 0..257 {
+                    if row[k] != 0.0 {
+                        s += row[k] * power[k];
+                    }
+                }
+                out[t] = (s + 2f32.powi(-24)).ln();
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         mel.par_chunks_exact_mut(n_frames)
             .enumerate()
-            .for_each(|(m, out)| {
-                let row = &self.mel_filters[m * 257..(m + 1) * 257];
-                for t in 0..n_frames {
-                    let power = powers[t];
-                    let mut s = 0f32;
-                    for k in 0..257 {
-                        if row[k] != 0.0 {
-                            s += row[k] * power[k];
-                        }
-                    }
-                    out[t] = (s + 2f32.powi(-24)).ln();
-                }
-            });
+            .for_each(|(m, out)| mel_row(m, out));
+        #[cfg(target_arch = "wasm32")]
+        mel.chunks_exact_mut(n_frames)
+            .enumerate()
+            .for_each(|(m, out)| mel_row(m, out));
 
         // per-utterance normalize over VALID frames: sample variance (N-1)
         let mut mean = [0f32; cfg::MEL_BINS];

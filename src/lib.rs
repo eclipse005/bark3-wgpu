@@ -14,6 +14,7 @@
 //! - the reference check is byte-exact transcription (see `verify.ps1`)
 
 pub mod bark;
+pub mod clock;
 pub mod cpu;
 pub mod encoder;
 pub mod gpu;

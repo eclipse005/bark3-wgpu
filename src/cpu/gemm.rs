@@ -780,7 +780,7 @@ mod tests {
             let w = vec![0.02f32; n * k];
             let pw = PackW::from_rows(&w, n, k);
             let mut c = vec![0f32; m * n];
-            let t = std::time::Instant::now();
+            let t = crate::clock::now();
             gemm(std::hint::black_box(&a), &pw, &mut c, m, 0, n);
             let dt = t.elapsed().as_secs_f64();
             println!(

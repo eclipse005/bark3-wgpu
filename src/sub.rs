@@ -206,7 +206,7 @@ pub fn subsample(sw: &SubsamplingWeights, mel_rows: &[f32], n_valid_frames: usiz
     // feeds 16 output channels, and the inner loop is a unit-stride f32 AXPY that
     // vectorizes well.  This is ~10x faster than the per-pixel scalar loop.
     let pw = |x: &Vec<f32>, w: &Vec<f32>, b: &Vec<f32>, t: usize, m: usize| -> Vec<f32> {
-        let tt = std::time::Instant::now();
+        let tt = crate::clock::now();
         let p = t * m;
         const CO: usize = 16;
         #[cfg(target_arch = "x86_64")]

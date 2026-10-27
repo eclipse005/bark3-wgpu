@@ -64,7 +64,7 @@ pub fn cpu_encoder_test(asr: &AsrInference, golden: &std::path::Path) -> Result<
     diff_report("h_l0(cpu vs gpu)", &h1[..t * 1024], gpu_block);
 
     // Full stack.
-    let started = std::time::Instant::now();
+    let started = bark3_pro_wgpu::clock::now();
     let pooler = cpu.encode(&sub_rows, t, 24);
     let seconds = started.elapsed().as_secs_f64();
     println!(

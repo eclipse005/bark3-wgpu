@@ -153,10 +153,16 @@ translation downstream do not change. `transcribe(samples)` decodes one clip wit
 no cuts; `transcribe_chunked` decodes each speech run with 0.2 s of context and
 gives every word to exactly one chunk.
 
-The wasm target is built in CI. Verifying it end to end needs WebGPU, so the
-practical gate is a page that feeds a known WAV and compares the JSON with
-`bark3 transcribe` on the same file: same code, different device, identical
-output.
+The browser build needs a WebGPU adapter; without one it refuses to load rather
+than silently running the CPU encoder (which needs threads that wasm32 does not
+have). The wasm target is built in CI; the end-to-end gate is a page that feeds a
+known WAV and compares the JSON with `bark3 transcribe` on the same file — same
+code, different device, identical output.
+
+The VAD is deliberately **not** part of this crate: cut times are an input. Pair
+the module with any voice-activity detector that yields silence midpoints (the
+sibling [silero-rs](https://github.com/eclipse005) port ships browser bindings
+too) and pass its cuts to `transcribeChunked`.
 
 ### Why wgpu?
 

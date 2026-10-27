@@ -183,11 +183,11 @@ impl CpuLayer {
         } = s;
 
         // ── FF1: h += 0.5 * ff2(silu(ff1(ln1(h))))
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         ops::layer_norm(x, normed, &self.ln[0].w, &self.ln[0].b, t, HIDDEN);
         sec[SEC_LN] += t0.elapsed().as_secs_f64();
 
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         gemm(normed, &self.ff1a, ffb, t, 0, 4096);
         ops::silu(&mut ffb[..t * 4096]);
         gemm(ffb, &self.ff1b, tmp, t, 0, HIDDEN);
@@ -195,15 +195,15 @@ impl CpuLayer {
         sec[SEC_FF1] += t0.elapsed().as_secs_f64();
 
         // ── attention
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         ops::layer_norm(x, normed, &self.ln[1].w, &self.ln[1].b, t, HIDDEN);
         sec[SEC_LN] += t0.elapsed().as_secs_f64();
 
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         gemm(normed, &self.qkv, qkv, t, 0, 3072);
         sec[SEC_QKV] += t0.elapsed().as_secs_f64();
 
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         ops::pack_attention_inputs(qkv, t, &self.bu, &self.bv, qu, qv, kh, vh);
         // `k` is consumed as the weight of the score GEMM, so it packs as an
         // (n = t, k = 128) row-major matrix; `v` is consumed on the k side of
@@ -225,7 +225,7 @@ impl CpuLayer {
             .for_each(|(h, w)| w.refill_cols(&relk_t[h * HDIM * pp..], pp, 0, pp, HDIM, true));
         sec[SEC_PACK] += t0.elapsed().as_secs_f64();
 
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         let mut q0 = 0usize;
         while q0 < t {
             let rows = (t - q0).min(BQ);
@@ -236,23 +236,23 @@ impl CpuLayer {
             let win = j1 - j0;
             debug_assert!(win <= t + BQ + 2 * PANEL);
             for h in 0..HEADS {
-                let t1 = std::time::Instant::now();
+                let t1 = crate::clock::now();
                 let a = &qu[h * t * HDIM + q0 * HDIM..];
                 gemm(a, &kh_pack[h], &mut probs[..rows * t], rows, 0, t);
                 sec[SEC_ASCORE] += t1.elapsed().as_secs_f64();
 
-                let t1 = std::time::Instant::now();
+                let t1 = crate::clock::now();
                 let a = &qv[h * t * HDIM + q0 * HDIM..];
                 gemm(a, &rkh_pack[h], &mut bd[..rows * win], rows, j0, win);
                 sec[SEC_ABD] += t1.elapsed().as_secs_f64();
 
-                let t1 = std::time::Instant::now();
+                let t1 = crate::clock::now();
                 // rel_shift + scale + softmax over the real frames, one pass.
                 let bd_ref: &[f32] = bd;
                 ops::rel_softmax_rows(&mut probs[..rows * t], bd_ref, win, rows, t, q0, j0, scale);
                 sec[SEC_ASOFT] += t1.elapsed().as_secs_f64();
 
-                let t1 = std::time::Instant::now();
+                let t1 = crate::clock::now();
                 gemm_split_k(
                     &probs[..rows * t],
                     &vh_pack[h],
@@ -272,13 +272,13 @@ impl CpuLayer {
         }
         sec[SEC_ATTN] += t0.elapsed().as_secs_f64();
 
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         gemm(attnout, &self.o, tmp, t, 0, HIDDEN);
         ops::add_scaled(x, tmp, 1.0);
         sec[SEC_OUT] += t0.elapsed().as_secs_f64();
 
         // ── conv module
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         ops::layer_norm(x, normed, &self.ln[2].w, &self.ln[2].b, t, HIDDEN);
         gemm(normed, &self.pw1, cb1, t, 0, 2048);
         ops::glu(cb1, cb2, t, HIDDEN);
@@ -288,7 +288,7 @@ impl CpuLayer {
         sec[SEC_CONV] += t0.elapsed().as_secs_f64();
 
         // ── FF2: h += 0.5 * ff2(silu(ff1(ln3(h))))
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         ops::layer_norm(x, normed, &self.ln[3].w, &self.ln[3].b, t, HIDDEN);
         gemm(normed, &self.ff2a, ffb, t, 0, 4096);
         ops::silu(&mut ffb[..t * 4096]);
@@ -299,7 +299,7 @@ impl CpuLayer {
         // ── block-final norm_out. It is written to the scratch instead of `x`
         // so a caller can still see the pre-norm residual (the reference dump
         // is taken before the swap).
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::now();
         ops::layer_norm(x, normed, &self.ln[4].w, &self.ln[4].b, t, HIDDEN);
         sec[SEC_LN] += t0.elapsed().as_secs_f64();
     }

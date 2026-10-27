@@ -1,0 +1,337 @@
+//! The library entry point: load once, transcribe many.
+//!
+//! ```no_run
+//! use bark3_pro_wgpu::{AsrInference, Backend, TranscribeOptions};
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let asr = AsrInference::load("models/Underdog-Bark-3.0-Pro", Backend::best())?;
+//! let out = asr.transcribe("clip.wav", TranscribeOptions::default())?;
+//! println!("{}", out.text);
+//! for segment in &out.segments {
+//!     println!("{:6.2} {:6.2}  {}", segment.start, segment.end, segment.text);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`AsrInference`] owns the model and takes `&self`, so one instance can be
+//! shared. [`Backend`] picks the compute path: the wgpu encoder, the
+//! CPU-resident encoder, or the automatic choice between them. The mel front end
+//! and the vocabulary are bundled, so the only input is the checkpoint
+//! directory — `model.safetensors` plus `config.json`.
+//!
+//! Internals (`gpu`, `tdt`, `sub_w`, `cpu`, `mel_fe`) are public only because
+//! the diagnostic binaries are separate crates that drive the stages directly.
+//! A library user needs [`AsrInference::load`] and
+//! [`AsrInference::transcribe`] / [`AsrInference::transcribe_samples`].
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+use crate::cpu::CpuEncoder;
+use crate::encoder::Encoder;
+use crate::gpu::{DeviceSelector, Gpu};
+use crate::mel::{MelFrontend, read_wav};
+use crate::raw::RawTensor;
+use crate::segment::Limits;
+use crate::sub::SubsamplingWeights;
+use crate::sub_gpu::SubGpu;
+use crate::tdt::TdtDecoder;
+use crate::tdt_gpu::GpuTdtDecoder;
+use crate::transcript::TranscribeResult;
+use crate::weights_io::TensorReader;
+
+/// The NeMo mel filterbank the reference front end uses, bundled as f32 so the
+/// checkpoint directory is the only input.
+const MEL_FILTERS: &[u8] = include_bytes!("../data/mel_filters.f32");
+
+/// Sample rate the model was trained on. Input audio must already be 16 kHz
+/// mono; [`AsrInference::transcribe`] rejects anything else.
+pub const SAMPLE_RATE: u32 = 16_000;
+
+/// Which compute path a [`AsrInference`] runs.
+///
+/// * [`Self::Auto`] (default) — the wgpu backend when it can be built, the CPU
+///   backend when it cannot. That fallback prints why, because 80x real time on
+///   a GPU versus 28x on the CPU should never happen silently.
+/// * [`Self::Gpu`] — require wgpu. No adapter or a failed init is an error.
+/// * [`Self::Cpu`] — the CPU-resident encoder. No adapter is created, so this
+///   runs on machines without a GPU.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl Backend {
+    /// The best backend this machine can offer — i.e. [`Self::Auto`]. The name
+    /// exists so a caller can say "give me the good one" without hard-coding a
+    /// variant.
+    #[must_use]
+    pub const fn best() -> Self {
+        Backend::Auto
+    }
+
+    /// Short human label, for logs and for asserting what got picked.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Backend::Auto => "auto",
+            Backend::Cpu => "cpu",
+            Backend::Gpu => "gpu",
+        }
+    }
+}
+
+/// Per-request knobs.
+///
+/// `#[non_exhaustive]` on purpose: fields get added, and a struct literal at a
+/// call site would then be a breaking change. Build one with
+/// [`TranscribeOptions::default`] plus the `with_*` setters.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TranscribeOptions {
+    /// How words are grouped into subtitle segments. Defaults to
+    /// [`Limits::default`] — the policy the regression baseline pins.
+    pub segments: Limits,
+}
+
+impl TranscribeOptions {
+    /// Replace the whole segmentation policy.
+    #[must_use]
+    pub fn with_segments(mut self, limits: Limits) -> Self {
+        self.segments = limits;
+        self
+    }
+
+    /// Silence in seconds that closes a segment.
+    #[must_use]
+    pub fn with_segment_gap(mut self, seconds: f32) -> Self {
+        self.segments.gap_seconds = seconds;
+        self
+    }
+
+    /// Soft cap on segment text length in characters.
+    #[must_use]
+    pub fn with_segment_max_chars(mut self, chars: usize) -> Self {
+        self.segments.max_chars = chars;
+        self
+    }
+
+    /// Hard cap on segment duration in seconds.
+    #[must_use]
+    pub fn with_segment_max_seconds(mut self, seconds: f32) -> Self {
+        self.segments.max_seconds = seconds;
+        self
+    }
+}
+
+/// Everything that only exists on the wgpu path: the adapter, the uploaded
+/// weights and every buffer derived from them.
+///
+/// Kept in one value so a CPU-only process allocates none of it — no adapter,
+/// no 1.2 GB of VRAM, and no requirement that the machine has a GPU at all.
+#[doc(hidden)]
+pub struct GpuState {
+    pub enc: Encoder,
+    pub decode: GpuTdtDecoder,
+    pub sub: SubGpu,
+}
+
+/// A loaded model: one instance transcribes any number of files.
+pub struct AsrInference {
+    /// `None` on the CPU backend.
+    #[doc(hidden)]
+    pub gpu: Option<GpuState>,
+    /// CPU TDT decoder. Always present: the GPU path uses it only for the
+    /// `BARK3_CPU_DEC=1` comparison.
+    #[doc(hidden)]
+    pub tdt: TdtDecoder,
+    #[doc(hidden)]
+    pub sub_w: SubsamplingWeights,
+    /// `Some` when the CPU encoder is loaded (CPU backend, or a diagnostic that
+    /// compares both).
+    #[doc(hidden)]
+    pub cpu: Option<CpuEncoder>,
+    #[doc(hidden)]
+    pub mel_fe: MelFrontend,
+    /// The backend that actually runs, after [`Backend::Auto`] resolved.
+    backend: Backend,
+    /// What `model_dir` turned out to hold, read from its header at load time.
+    info: crate::weights_io::ModelInfo,
+    model_dir: PathBuf,
+}
+
+impl AsrInference {
+    /// Load weights from a checkpoint directory (`model.safetensors` +
+    /// `config.json`) and build `backend`.
+    pub fn load(model_dir: impl AsRef<Path>, backend: Backend) -> Result<Self> {
+        let model_dir = model_dir.as_ref().to_path_buf();
+        // Read the header first: it says which release this is, and it must say
+        // the architecture this build was compiled for. Cheaper and clearer than
+        // discovering it from a missing tensor after a 1.2 GB upload.
+        let info = crate::weights_io::probe(&model_dir)?;
+        info.check_architecture()?;
+        eprintln!("[model] {}", info.summary());
+        let started = std::time::Instant::now();
+        // One checkpoint reader serves both backends: each tensor is read, used
+        // and released, so the 1.25 GB file never has to be resident as a whole.
+        let src = TensorReader::open_model(&model_dir)?;
+        let get = |n: &str| src.read(n);
+        // A low-bit checkpoint names the tensors it ships as codes + levels.
+        let lowbit = read_lowbit(&model_dir)?;
+        let tdt = TdtDecoder::from_source(&get)?;
+        let sub_w = SubsamplingWeights::from_source(&get)?;
+
+        let gpu = match backend {
+            Backend::Cpu => None,
+            Backend::Gpu => Some(Self::load_gpu(&get, &lowbit, &tdt, &sub_w)?),
+            Backend::Auto => match Self::load_gpu(&get, &lowbit, &tdt, &sub_w) {
+                Ok(gpu) => Some(gpu),
+                Err(err) => {
+                    eprintln!("[gpu] unavailable ({err:#}); falling back to the CPU backend");
+                    None
+                }
+            },
+        };
+        let cpu = if gpu.is_some() {
+            None
+        } else {
+            Some(Self::load_cpu(&get)?)
+        };
+        let backend = if gpu.is_some() {
+            Backend::Gpu
+        } else {
+            Backend::Cpu
+        };
+        eprintln!(
+            "[load] {} backend in {:.2}s",
+            backend.tag(),
+            started.elapsed().as_secs_f32()
+        );
+
+        Ok(Self {
+            gpu,
+            tdt,
+            sub_w,
+            cpu,
+            mel_fe: MelFrontend::new(mel_filters()),
+            backend,
+            info,
+            model_dir,
+        })
+    }
+
+    fn load_gpu(
+        get: &impl Fn(&str) -> Result<RawTensor>,
+        lowbit: &std::collections::HashMap<String, u32>,
+        tdt: &TdtDecoder,
+        sub_w: &SubsamplingWeights,
+    ) -> Result<GpuState> {
+        let gpu = pollster::block_on(Gpu::new_with(DeviceSelector::Auto))?;
+        eprintln!("[gpu] {}", gpu.describe());
+        let enc = Encoder::load_with(gpu, lowbit, get)?;
+        let decode = GpuTdtDecoder::new(&enc.gpu, tdt)?;
+        let sub = SubGpu::new(&enc.gpu, sub_w)?;
+        Ok(GpuState { enc, decode, sub })
+    }
+
+    fn load_cpu(get: &impl Fn(&str) -> Result<RawTensor>) -> Result<CpuEncoder> {
+        let started = std::time::Instant::now();
+        let cpu = CpuEncoder::load_with(get)?;
+        eprintln!(
+            "[load] cpu encoder in {:.2}s",
+            started.elapsed().as_secs_f32()
+        );
+        Ok(cpu)
+    }
+
+    /// Build the CPU encoder in addition to whatever is already loaded, so the
+    /// two backends can be compared. Diagnostic binaries only.
+    #[doc(hidden)]
+    pub fn load_cpu_encoder(&mut self) -> Result<()> {
+        if self.cpu.is_some() {
+            return Ok(());
+        }
+        let src = TensorReader::open_model(&self.model_dir)?;
+        self.cpu = Some(Self::load_cpu(&|n| src.read(n))?);
+        Ok(())
+    }
+
+    /// The backend actually in use, after [`Backend::Auto`] resolved.
+    #[must_use]
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    /// Which release this instance loaded, and in which weight layout.
+    ///
+    /// Read from the checkpoint header during [`Self::load`], which also refuses
+    /// an architecture this build was not compiled for.
+    #[must_use]
+    pub fn model_info(&self) -> &crate::weights_io::ModelInfo {
+        &self.info
+    }
+
+    /// Human-readable description of the compute device.
+    #[must_use]
+    pub fn device_description(&self) -> String {
+        self.gpu
+            .as_ref()
+            .map_or_else(|| "cpu (no adapter)".to_string(), |g| g.enc.gpu.describe())
+    }
+
+    /// The wgpu backend, or an error naming the reason it is absent.
+    pub fn gpu(&self) -> Result<&GpuState> {
+        self.gpu
+            .as_ref()
+            .context("this instance is running the CPU backend; load with Backend::Gpu")
+    }
+
+    /// Transcribe a 16 kHz mono WAV file.
+    pub fn transcribe(
+        &self,
+        path: impl AsRef<Path>,
+        options: TranscribeOptions,
+    ) -> Result<TranscribeResult> {
+        let path = path.as_ref();
+        let wave = read_wav(path)?;
+        self.transcribe_samples(&wave, options)
+            .with_context(|| format!("transcribing {}", path.display()))
+    }
+
+    /// Transcribe in-memory 16 kHz mono samples.
+    pub fn transcribe_samples(
+        &self,
+        samples: &[f32],
+        options: TranscribeOptions,
+    ) -> Result<TranscribeResult> {
+        crate::transcription::run(self, samples, None, &options)
+    }
+}
+
+/// `lowbit.json` when the checkpoint stores dense weights as 4-bit codes.
+fn read_lowbit(model_dir: &Path) -> Result<std::collections::HashMap<String, u32>> {
+    let path = model_dir.join("lowbit.json");
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let map: std::collections::HashMap<String, u32> =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    eprintln!("[load] low-bit weights: {} tensors", map.len());
+    Ok(map)
+}
+
+/// The bundled mel filterbank, `[128, 257]` f32.
+fn mel_filters() -> Vec<f32> {
+    MEL_FILTERS
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}

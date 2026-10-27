@@ -1,0 +1,13 @@
+# Rust build output
+/target/
+
+# Generated shader dump and runtime dumps (verification assets are kept outside
+# the repository: set BARK3_GOLDEN to their directory)
+/data/dump_*.bin
+/data/gemm_mix.wgsl
+
+# Editor / OS noise
+*.swp
+*~
+Thumbs.db
+.DS_Store

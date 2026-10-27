@@ -33,13 +33,13 @@ use crate::cpu::CpuEncoder;
 use crate::encoder::Encoder;
 use crate::gpu::{DeviceSelector, Gpu};
 use crate::mel::{MelFrontend, read_wav};
-use crate::weights::WeightSource;
 use crate::segment::Limits;
 use crate::sub::SubsamplingWeights;
 use crate::sub_gpu::SubGpu;
 use crate::tdt::TdtDecoder;
 use crate::tdt_gpu::GpuTdtDecoder;
 use crate::transcript::TranscribeResult;
+use crate::weights::WeightSource;
 
 /// The NeMo mel filterbank the reference front end uses, bundled as f32 so the
 /// checkpoint directory is the only input.
@@ -255,7 +255,9 @@ impl AsrInference {
         if self.cpu.is_some() {
             return Ok(());
         }
-        self.cpu = Some(Self::load_cpu(crate::weights::open(&self.model_dir)?.as_ref())?);
+        self.cpu = Some(Self::load_cpu(
+            crate::weights::open(&self.model_dir)?.as_ref(),
+        )?);
         Ok(())
     }
 

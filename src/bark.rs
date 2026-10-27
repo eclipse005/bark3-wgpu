@@ -23,9 +23,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use constriction::stream::{
-    Decode,
-    model::DefaultContiguousCategoricalEntropyModel,
-    stack::DefaultAnsCoder,
+    Decode, model::DefaultContiguousCategoricalEntropyModel, stack::DefaultAnsCoder,
 };
 
 use crate::raw::RawTensor;
@@ -293,10 +291,10 @@ impl BarkContainer {
         if e.kind != Kind::Levels2 {
             return Ok(None);
         }
-        let decoded = std::sync::Arc::new(
-            self.decode_levels2(name, e)
-                .with_context(|| format!("{name}: decoding levels2 entry at offset {}", e.offset))?,
-        );
+        let decoded =
+            std::sync::Arc::new(self.decode_levels2(name, e).with_context(|| {
+                format!("{name}: decoding levels2 entry at offset {}", e.offset)
+            })?);
         self.cache
             .lock()
             .unwrap()
@@ -362,10 +360,11 @@ impl BarkContainer {
             let total: f64 = table.iter().map(|&v| v as f64).sum();
             ensure!(total > 0.0, "{name}: empty symbol table for class {c}");
             let probs: Vec<f64> = table.iter().map(|&v| v as f64 / total).collect();
-            let model = DefaultContiguousCategoricalEntropyModel::from_floating_point_probabilities_fast(
-                &probs, None,
-            )
-            .map_err(|_| anyhow::anyhow!("{name}: invalid symbol table"))?;
+            let model =
+                DefaultContiguousCategoricalEntropyModel::from_floating_point_probabilities_fast(
+                    &probs, None,
+                )
+                .map_err(|_| anyhow::anyhow!("{name}: invalid symbol table"))?;
             let n = rows * columns.len();
             let decoded: Vec<usize> = decoder
                 .decode_iid_symbols(n, &model)
@@ -495,7 +494,9 @@ impl BarkContainer {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
-            names.par_iter().try_for_each(|n| self.read_lowbit(n).map(|_| ()))?;
+            names
+                .par_iter()
+                .try_for_each(|n| self.read_lowbit(n).map(|_| ()))?;
         }
         #[cfg(target_arch = "wasm32")]
         {

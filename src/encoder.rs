@@ -16,12 +16,12 @@ use anyhow::Result;
 use bytemuck::Pod;
 use bytemuck::Zeroable;
 
-use crate::cfg;
 use crate::bark::LowBitTensor;
+use crate::cfg;
 use crate::gpu::{BulkUpload, Gpu};
-use crate::weights::WeightSource;
 use crate::raw::RawTensor;
 use crate::shaders;
+use crate::weights::WeightSource;
 
 mod gemm;
 mod prof;
@@ -370,11 +370,7 @@ fn load_qkv(
         );
         for (i, part) in parts.iter().enumerate() {
             let base = i as u64 * part.rows as u64;
-            up.upload_at(
-                &buf,
-                base * 2 * 4,
-                bytemuck::cast_slice(&part.levels),
-            )?;
+            up.upload_at(&buf, base * 2 * 4, bytemuck::cast_slice(&part.levels))?;
             up.upload_at(
                 &buf,
                 (rows as u64 * 2 + base * codes_ld as u64) * 4,

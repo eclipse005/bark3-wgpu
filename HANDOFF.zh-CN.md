@@ -179,7 +179,15 @@ python repeat.py                                                # 同一实例�
 - **本机支持 WebGPU**：安装版 Chrome / Edge 基线参数下 `navigator.gpu.requestAdapter()` 能拿到适配器；`Win32_VideoController` 实际是 `Intel(R) Graphics` + `NVIDIA GeForce GTX 1070`（`nvidia-smi` 报 P104-100）+ `GameViewer Virtual Display`（远程会话）。
 - **Playwright 自带的 Chromium 没有 WebGPU**（无 `navigator.gpu`），必须 `channel="chrome"` 或 `"msedge"`。
 - `--use-angle=d3d12` 会把 WebGL 切到 SwiftShader，看着像“没有显卡”；`--use-angle=vulkan` 能看到 P104（但那是 WebGL，不是 WebGPU）。
-- Chrome 在 Windows 上**忽略 `powerPreference`**（crbug 369219127）：拿到哪块卡由系统决定。想用独显：Windows 设置 → 系统 → 显示 → 图形 → 为 `chrome.exe` 选择「高性能」；或者直接 `BARK3_DEVICE=nvidia` 用原生跑（103x，比浏览器稳）。
+- Chrome 在 Windows 上**忽略 `powerPreference`**（crbug 369219127）：拿到哪块卡由系统决定。想用独显：Windows 设置 → 系统 → 显示 → 图形 → 为 `chrome.exe` 选「高性能」。等价的注册表（已验证可用，重启 Chrome 生效）：
+
+  ```powershell
+  $k = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+  Set-ItemProperty -Path $k -Type String -Name 'C:\Program Files\Google\Chrome\Application\chrome.exe' -Value 'GpuPreference=2;'
+  # 验证：python D:\Bark\bark3-verify\e2e\gpu_info.py  → vendor=nvidia / architecture=pascal
+  ```
+
+  设完之后 Chrome 的 WebGPU 适配器变成 **NVIDIA P104-100（pascal）**；删掉该值即回到「让 Windows 决定」（本机是 Intel Xe 集显）。
 - 浏览器内 wgpu 的限制：`wg workgroup storage` 只有 **32768 B**（原生集显报 49152）；`maxStorageBufferBindingSize` 2047 MiB。`P_ADD_SOFTMAX_F32` 的 workgroup 用量 18432 B，能过。
 - **任何 readback 都必须 async**：`mapAsync` 走 JS 事件循环，同步等 = 页面死锁（踩过两次：一次在 `device.poll`，一次在 `map_read`）。
 - `Device::poll` / `pollster::block_on` 在 wasm 上不能用；`Gpu::wait()` 已改成 no-op。
@@ -227,6 +235,15 @@ python repeat.py                                                # 同一实例�
 | **Pro**（bf16 1.25 GB） | 4.2 s | 1.66 s | **9.0x** | **逐字节一致**（2330 字符全同） |
 | **Plus**（low-bit 180 MB） | 11.5–12.5 s | 2.4 s | **6.2x** | 文本/分句/41 词/5 段全同；3 个词的边界差 **80 ms（1 帧）** |
 | Plus（CPU 回退，`?backend=cpu`） | ~20 s | 52–60 s | 0.26–0.29x | 逐字节一致 |
+
+换显卡只改速度，不改结果（90 s 音频、Plus、低比特，同一页面同一条链路）：
+
+| Chrome 用哪块卡 | 解码 | 实时倍率 |
+|---|---:|---:|
+| NVIDIA P104-100（独显，`GpuPreference=2`） | 2.32 s | **38.9x** |
+| Intel Xe-LPG（集显，默认） | 5.75 s | **15.6x** |
+
+15 s 的短片测不准——固定开销（首次 dispatch、buffer 分配）占大头，独显 5.5x、集显 6.2x 反而看不出差别；90 s 才反映稳态。两种卡上 Pro 都逐字节一致、Plus 都只在同样 3 个词上差 1 帧，说明这点差异与硬件无关，是 Tint 与原生代码生成的区别。
 
 low-bit 那 3 处差异（浏览器 vs 原生）：
 

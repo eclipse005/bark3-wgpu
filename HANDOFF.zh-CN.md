@@ -476,3 +476,26 @@ March thirteenth, 2022. A man slips ...     ← 修复后
 
 `eval_device.py` 现在会**主动报告**这类异常（`letter+digit`、`space-before-punct`），跑完在均值前面就打印出来，不再靠肉眼翻 20 条。
 
+
+---
+
+## 20. 权重上传 ModelScope：清单与校验（2026-10-27 核对）
+
+`D:\models` 里是**官方原样**的快照，没有经过任何转换（本项目的 loader 只读）。本地 SHA-256 与当年核对过的 HF LFS 值一致：
+
+| 发布 | 文件 | 字节 | SHA-256 |
+|---|---|---:|---|
+| Underdog-Bark-3.0-Pro | `model.safetensors` | 1,254,196,636 | `6f84b33e63ebd1851e910e8b2fe299d29f5e0efc6f57e84d92d2f79af464e0e5` |
+| Underdog-Bark-3.0-Plus | `model.bark` | 179,524,845 | `fdd9f1052e4fdead07d71e8cd2138813eb0c209fd6ff8b1b6f47737e1e501857` |
+| Underdog-Bark-3.0 | `model.bark` | 163,398,645 | `c18de9418d73cbeb80b8c1287b392d480a56e191ef4a81d1baaa1b02e66d92ed` |
+| Underdog-Bark-3.0-Clean | `model.bark` | 179,458,613 | `b67ca90d94b79a36af4616f1cb3f241884925de7aa9f3e673a8d5c6c4cfd3436` |
+
+每个目录里的 `NOTICE` 是 PDF 之外的署名文件（上游 NVIDIA `parakeet-tdt-0.6b-v3`、Moondream `parakeet-ultra`，均 CC-BY-4.0）；Pro 目录里的 `runtime/`（`requirements.txt` + `transcribe_bark_pro.py`）也是官方仓库自带，不是我们生成的。
+
+**上传要求（CC-BY-4.0）**
+
+- 保留 `NOTICE`，仓库 license 标成 CC-BY-4.0，写明发布者是 Conway Research，本仓库是**未修改的镜像**；
+- 保留到原 HF 仓库的链接；不要声称是官方发布；
+- 上传**整个官方目录**（Pro 带 config/tokenizer/runtime），不要只传 `model.safetensors`——否则 `AutoProcessor` 没法用；
+- 不要上传本项目生成的东西（`lowbit.json`、dump、pkg 等）；目前 `D:\models` 里也没有这类文件。
+

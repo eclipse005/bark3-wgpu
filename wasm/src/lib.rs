@@ -50,14 +50,44 @@ impl BarkAsr {
             _ => Backend::Auto,
         };
         let bytes = std::sync::Arc::new(model);
+        // A compressed release is worth caching (its load is dominated by ANS /
+        // LZMA decoding); a safetensors checkpoint is already fast and would
+        // only produce a gigabyte of cache.
+        let cacheable = bark3_wgpu::weights::looks_like_container(bytes.as_slice());
+        let key = bark3_wgpu::weights_cache::fingerprint(&bytes, release.as_deref());
+        let mut recorder = None;
         let source: Box<dyn bark3_wgpu::weights::WeightSource> =
-            match bark3_wgpu::weights::open_bytes(bytes, release) {
-                Ok(src) => src,
-                Err(e) => return Err(JsError::new(&format!("{e:#}"))),
+            if cacheable && let Ok(Some(cached)) = bark3_wgpu::weights_cache::load(key).await {
+                bark3_wgpu::browser::log(&format!("[wasm] weights from cache {key:016x}"));
+                cached
+            } else {
+                let fresh = match bark3_wgpu::weights::open_bytes(bytes.clone(), release) {
+                    Ok(src) => src,
+                    Err(e) => return Err(JsError::new(&format!("{e:#}"))),
+                };
+                if cacheable {
+                    let (recorded, rec) = bark3_wgpu::weights_cache::record(fresh);
+                    recorder = Some(rec);
+                    recorded
+                } else {
+                    fresh
+                }
             };
         let mut inner = AsrInference::load_source(source, backend)
             .await
             .map_err(|e| JsError::new(&format!("{e:#}")))?;
+        if let Some(rec) = recorder {
+            // Written in the background: the page can start transcribing while
+            // the decoded tensors go to disk for the next load.
+            wasm_bindgen_futures::spawn_local(async move {
+                match rec.persist(key).await {
+                    Ok(()) => bark3_wgpu::browser::log("[wasm] weights cached for the next load"),
+                    Err(e) => {
+                        bark3_wgpu::browser::log(&format!("[wasm] cache write failed: {e:#}"));
+                    }
+                }
+            });
+        }
         bark3_wgpu::browser::log("[wasm] create: inference ready");
         if inner.backend() != Backend::Cpu {
             // Dawn compiles each pipeline at its first dispatch; doing that here

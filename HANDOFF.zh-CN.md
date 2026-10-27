@@ -352,3 +352,34 @@ on             start 14.07 vs 14.15
 2. **稳态 55–59x vs 原生 81–85x**：差在 Chrome 每次 dispatch/bind group 的 JS 边界与 Dawn 校验；host 编码实测只占 14 ms，所以不是 Rust 侧的开销。
 3. **CPU 回退仍 0.27x**：只有 SIMD128 能救（§8 待办 3）。
 
+
+---
+
+## 15. 2026-10-27 wasm 侧优化：OPFS 权重缓存
+
+**问题**：Plus 的 12.5 s 加载里约 10 s 是**容器解码**（ANS + 纯 Rust LZMA），GPU 上传只占一小部分；而解码结果是确定的，只有换模型才会变。
+
+**做法**（`src/weights_cache.rs`，仅 wasm 编译）：
+
+- `fingerprint()`：长度 + release 名 + 三段 64 KiB 采样（FNV-1a）。整文件哈希比它要省下的解码还贵。
+- `record()` 包住真正的 `WeightSource`，记下每个张量**解码后**的形态（RawTensor / LowBitTensor / 没这个形态）。
+- `Recorder::persist()` 把记录写成 OPFS 里的一个扁平文件（magic + 版本 + 每张量的元数据和字节 + ModelInfo + 结束标记），在 `create()` 返回后**后台**写，不挡第一次转录。
+- 下次 `create()` 先 `load()`：读文件 0.2 s → 解析 0.6–0.75 s → 直接当 `WeightSource` 用。
+
+**结果**（Plus，20 条语料，90 s 音频，同一个持久 profile）：
+
+| | 模型加载 | 首次转录 | 20/20 假设与原生 |
+|---|---:|---:|---|
+| 冷（解码 + 写缓存） | 12.8 s | 150 ms | 相同 |
+| 热（OPFS 命中） | **1.9 s** | 150 ms | 相同 |
+
+缓存文件约 **397 MB/模型**（4-bit 码保持 4-bit，不展开成 f16）。`model.safetensors`（Pro）**不缓存**：它本来就 3.2 s，缓存要 1.25 GB。
+
+**踩过的三个坑**（都已在代码里注释）
+
+1. `getFileHandle` 必须带 `create: true`，否则 `NotFoundError`。
+2. 缓存里的 payload **不是 4 字节对齐**的，`bytemuck::cast_slice` 会 panic，wasm 里表现为页面直接卡死（等着 180 s 也等不到结果）；改成 `chunks_exact` 手工组 u32/u16。
+3. 写元数据时存了**元素数**、读的时候按**字节数**消费 → 报 `truncated cache file`；现在元数据一律存字节长度。
+
+配额：缓存走浏览器的 OPFS 配额（通常约磁盘 60%），两个 low-bit 模型约 800 MB；`persist` 失败只会打日志，不影响使用。
+

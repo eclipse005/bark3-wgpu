@@ -1,0 +1,22 @@
+perf(wasm): cache decoded weights in OPFS, cutting the load from 12.8 s to 1.9 s
+
+A compressed release spends its load decoding, not uploading: the container's
+ANS/LZMA payloads take about ten seconds for the 180 MB Plus checkpoint while
+the GPU upload of the result is a fraction of that. The decoded tensors are
+deterministic and only change with the release.
+
+`weights_cache` records every tensor a real source returns (float or 4-bit),
+writes them to a single OPFS file after `create()` returns, and serves the next
+load straight from that file. The key is a fingerprint of the model bytes, so a
+stale cache costs a re-decode and never a wrong model. Safetensors checkpoints
+are left uncached: they already load in 3.2 s and would produce 1.25 GB of
+cache.
+
+Measured on the P104-100 over the 20-clip English split: load 12765 ms -> 1941 ms
+(read 0.2 s + parse 0.6 s), first clip unchanged at 150 ms, and all 20
+hypotheses still identical to the native run.
+
+Three bugs found on the way, all noted in the code: getFileHandle needs
+`create: true`, payloads are not word-aligned (bytemuck cast_slice panics and
+hangs the page), and the metadata wrote element counts where the reader expected
+byte counts.

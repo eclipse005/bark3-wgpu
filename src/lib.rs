@@ -32,6 +32,8 @@ pub mod tdt;
 pub mod tdt_gpu;
 pub mod transcript;
 pub mod weights;
+#[cfg(target_arch = "wasm32")]
+pub mod weights_cache;
 pub mod weights_io;
 
 mod transcription;

@@ -99,19 +99,15 @@ pub fn open(dir: &Path) -> Result<Box<dyn WeightSource>> {
     }
 }
 
-/// Opens a checkpoint that is already in memory (the wasm build, and callers that
-/// fetched the file themselves). The layout is sniffed from the bytes: a
-/// `model.bark` container starts with a JSON index carrying a `format` field.
-pub fn open_bytes(
-    data: std::sync::Arc<Vec<u8>>,
-    release: Option<String>,
-) -> Result<Box<dyn WeightSource>> {
-    // A compressed release is length-prefixed JSON whose `format` says so. A
-    // safetensors file is length-prefixed JSON too (and torch writes a
-    // `"format":"pt"` in it), so the marker has to be the bark format tag
-    // itself — otherwise the full-precision checkpoint is handed to the
-    // container reader and rejected.
-    let looks_like_container = data.len() > 8 && {
+/// Whether these bytes are a compressed release (a `model.bark` container).
+///
+/// A container is length-prefixed JSON whose `format` says so. A safetensors
+/// file is length-prefixed JSON too (and torch writes a `"format":"pt"` in it),
+/// so the marker has to be the bark format tag itself — otherwise the
+/// full-precision checkpoint is handed to the container reader and rejected.
+#[must_use]
+pub fn looks_like_container(data: &[u8]) -> bool {
+    data.len() > 8 && {
         let len = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
         len > 0
             && len < (64 << 20)
@@ -124,8 +120,17 @@ pub fn open_bytes(
                         .map(|tag| tag.starts_with("bark-levels-"))
                 })
                 .unwrap_or(false)
-    };
-    if looks_like_container {
+    }
+}
+
+/// Opens a checkpoint that is already in memory (the wasm build, and callers that
+/// fetched the file themselves). The layout is sniffed from the bytes: a
+/// `model.bark` container starts with a JSON index carrying a `format` field.
+pub fn open_bytes(
+    data: std::sync::Arc<Vec<u8>>,
+    release: Option<String>,
+) -> Result<Box<dyn WeightSource>> {
+    if looks_like_container(data.as_slice()) {
         Ok(Box::new(BarkContainer::from_bytes(data, release)?))
     } else {
         Ok(Box::new(SafetensorsSource {

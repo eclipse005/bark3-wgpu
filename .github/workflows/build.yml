@@ -37,7 +37,9 @@ jobs:
       # Browser bindings: the same engine compiled for wasm32. Tests need a GPU,
       # so CI only proves that the target, the crate and the JS entry points build.
       - run: cargo build --release -p bark3-wasm --target wasm32-unknown-unknown
-      - run: cargo check --target wasm32-unknown-unknown --all-targets
+      # The CLI is a native binary; only the browser crate and its tests are
+      # expected to build for wasm32.
+      - run: cargo check -p bark3-wasm --target wasm32-unknown-unknown --all-targets
 
   lint:
     name: fmt + clippy

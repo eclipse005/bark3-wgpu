@@ -73,9 +73,12 @@ pub struct TranscribeResult {
 impl TranscribeResult {
     /// Assembles every view from the decoder output.
     pub fn new(tokens: Vec<Token>, vocab: &[String], duration: f32, limits: &Limits) -> Self {
-        let text = Self::text_from_tokens(&tokens, vocab);
+        let text = normalize_spacing(&Self::text_from_tokens(&tokens, vocab));
         let words = Self::words_from_tokens(&tokens, vocab, duration);
-        let segments = segment::words_to_segments(&words, duration, limits);
+        let mut segments = segment::words_to_segments(&words, duration, limits);
+        for segment in &mut segments {
+            segment.text = normalize_spacing(&segment.text);
+        }
         Self {
             text,
             words,
@@ -115,8 +118,14 @@ impl TranscribeResult {
                 None => (false, piece),
             };
             // A leading marker on punctuation must not start a word: `▁-` and
-            // `▁'` belong to the word before them.
-            if body.is_empty() || (opens_word && !is_punctuation(body)) {
+            // `▁'` belong to the word before them. A bare digit piece is its own
+            // word though: the tokenizer writes `2022` as four unmarked pieces,
+            // and gluing them onto the previous word would give that word the
+            // number's time span.
+            let digit_after_letters = is_digits(body)
+                && !current.is_empty()
+                && !current.ends_with(|c: char| c.is_ascii_digit());
+            if body.is_empty() || (opens_word && !is_punctuation(body)) || digit_after_letters {
                 flush(&mut words, &mut current, start_frame, end_frame, duration);
             }
             if body.is_empty() {
@@ -159,9 +168,94 @@ impl fmt::Display for TranscribeResult {
 }
 
 /// Concatenate vocab pieces, skipping special tokens — the reference
-/// `batch_decode(skip_special_tokens=True)` rendering.
+/// `batch_decode(skip_special_tokens=True)` rendering, before the spacing pass.
 pub fn tokens_to_text(tokens: &[Token], vocab: &[String]) -> String {
-    TranscribeResult::text_from_tokens(tokens, vocab)
+    normalize_spacing(&TranscribeResult::text_from_tokens(tokens, vocab))
+}
+
+/// Puts spaces where the tokenizer leaves them out.
+///
+/// The vocabulary stores digits as bare single-character pieces (ids 234-243:
+/// `0`..`9`) and marks a word start with `▁` only on word pieces. SentencePiece
+/// decode concatenates pieces as they are, so a year arrives as
+/// `thirteenth,2022` and a spoken number can arrive as `March13`. The content is
+/// right; only the spacing is missing, and no consumer wants the glued form.
+///
+/// This pass only ever adds or removes spaces — it never touches a character:
+///
+/// * a space before `, . ; : ! ? ) ] }` and closing quotes goes away;
+/// * a space is added after those marks when a letter or digit follows, except
+///   where the mark is inside a number (`1,000`, `3.5`, `12:30`);
+/// * a space is added between a run of two or more letters and a following
+///   digit (`March13` -> `March 13`), which leaves `H1N1` and `3D` alone.
+#[must_use]
+pub fn normalize_spacing(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len() + 8);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ' ' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] == ' ' {
+                j += 1;
+            }
+            let next = chars.get(j).copied();
+            let drop = matches!(
+                next,
+                Some(',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '”')
+            ) || out.is_empty();
+            if !drop && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            i = j;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+        if matches!(c, ',' | ';' | ':' | '!' | '?') || c == '.' {
+            let next = chars.get(i).copied();
+            let prev = out.chars().nth_back(1);
+            if let Some(next) = next {
+                let digits_after = chars[i..].iter().take_while(|d| d.is_ascii_digit()).count();
+                // `1,000` is one number (exactly three digits in the group);
+                // `13,2022` is a date and wants the space. A colon or a point
+                // between two digits stays as it is (`12:30`, `3.5`).
+                let in_number = prev.is_some_and(|p| p.is_ascii_digit())
+                    && next.is_ascii_digit()
+                    && match c {
+                        ',' => digits_after == 3,
+                        _ => true,
+                    };
+                if next.is_alphanumeric() && !in_number {
+                    out.push(' ');
+                }
+            }
+        }
+    }
+    letters_before_digits(&out)
+}
+
+/// `March13` -> `March 13`, but `H1N1` stays as it is.
+fn letters_before_digits(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut letters = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_alphabetic() {
+            letters += 1;
+        } else if c.is_ascii_digit() {
+            let prev_digit = i > 0 && chars[i - 1].is_ascii_digit();
+            if !prev_digit && letters >= 2 {
+                out.push(' ');
+            }
+            letters = 0;
+        } else {
+            letters = 0;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The model's SentencePiece vocabulary, indexed by token id.
@@ -219,6 +313,11 @@ fn piece(vocab: &[String], id: u32) -> &str {
 fn is_special(id: u32, piece: &str) -> bool {
     matches!(id, cfg::BLANK | cfg::PAD | cfg::EOS | cfg::UNK)
         || (piece.starts_with("<|") && piece.ends_with("|>"))
+}
+
+/// True when the piece is one or more ASCII digits and nothing else.
+fn is_digits(piece: &str) -> bool {
+    !piece.is_empty() && piece.chars().all(|c| c.is_ascii_digit())
 }
 
 /// True when the piece has no letters or digits, i.e. it is punctuation and
@@ -350,6 +449,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(text, joined);
+    }
+
+    #[test]
+    fn spacing_pass_joins_numbers_to_their_words() {
+        // What the tokenizer gives: bare digit pieces, bare commas.
+        assert_eq!(normalize_spacing("thirteenth,2022."), "thirteenth, 2022.");
+        assert_eq!(
+            normalize_spacing("March13,2022 , a man"),
+            "March 13, 2022, a man"
+        );
+        assert_eq!(
+            normalize_spacing("costs 1,000 dollars"),
+            "costs 1,000 dollars"
+        );
+        assert_eq!(normalize_spacing("at 12:30 pm"), "at 12:30 pm");
+        assert_eq!(normalize_spacing("H1N1 and 3D"), "H1N1 and 3D");
+        assert_eq!(normalize_spacing("a 3.5 second clip"), "a 3.5 second clip");
+        assert_eq!(normalize_spacing("Hello, there."), "Hello, there.");
+        // Content is never touched, only spaces.
+        let odd = "Hello  world .";
+        assert_eq!(normalize_spacing(odd), "Hello world.");
     }
 
     #[test]

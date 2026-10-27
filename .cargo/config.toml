@@ -1,0 +1,5 @@
+# wasm SIMD is what makes the CPU backend usable in the browser: the encoder
+# GEMM falls back to a scalar kernel otherwise (see src/cpu/gemm.rs).
+# Every browser that runs WebGPU has had simd128 since 2020.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

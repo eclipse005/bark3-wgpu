@@ -142,7 +142,7 @@ impl Recorder {
     /// Writes everything this source decoded to the cache file for the key.
     pub async fn persist(&self, key: u64) -> Result<()> {
         let dir = directory().await?;
-        let mut options = web_sys::FileSystemGetFileOptions::new();
+        let options = web_sys::FileSystemGetFileOptions::new();
         options.set_create(true);
         let handle = JsFuture::from(dir.get_file_handle_with_options(&file_name(key), &options))
             .await
@@ -169,6 +169,20 @@ impl Recorder {
             entries.len(),
             total as f64 / 1e6
         ));
+        // Guard rail: an f32-expanded recording would be gigabytes, and a cache
+        // that big costs more disk than the load it saves.
+        const MAX_BYTES: usize = 700 << 20;
+        if total > MAX_BYTES {
+            crate::browser::log(&format!(
+                "[wasm] cache skipped: {:.0} MB exceeds the {} MB budget",
+                total as f64 / 1e6,
+                MAX_BYTES >> 20
+            ));
+            JsFuture::from(stream.unchecked_ref::<web_sys::WritableStream>().close())
+                .await
+                .map_err(|e| anyhow!("closing the cache file: {e:?}"))?;
+            return Ok(());
+        }
         let mut header = Vec::with_capacity(MAGIC.len() + 8);
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&VERSION.to_le_bytes());

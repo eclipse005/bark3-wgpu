@@ -53,7 +53,12 @@ impl BarkAsr {
         // A compressed release is worth caching (its load is dominated by ANS /
         // LZMA decoding); a safetensors checkpoint is already fast and would
         // only produce a gigabyte of cache.
-        let cacheable = bark3_wgpu::weights::looks_like_container(bytes.as_slice());
+        // Only the GPU path reads the 4-bit codes as codes. The CPU encoder
+        // widens every weight to f32, so recording it there would cache ~2.5 GB
+        // (and run the wasm heap out of memory) instead of the ~400 MB the GPU
+        // path needs.
+        let cacheable =
+            backend != Backend::Cpu && bark3_wgpu::weights::looks_like_container(bytes.as_slice());
         let key = bark3_wgpu::weights_cache::fingerprint(&bytes, release.as_deref());
         let mut recorder = None;
         let source: Box<dyn bark3_wgpu::weights::WeightSource> =
@@ -73,7 +78,7 @@ impl BarkAsr {
                     fresh
                 }
             };
-        let mut inner = AsrInference::load_source(source, backend)
+        let inner = AsrInference::load_source(source, backend)
             .await
             .map_err(|e| JsError::new(&format!("{e:#}")))?;
         if let Some(rec) = recorder {
@@ -101,7 +106,6 @@ impl BarkAsr {
                 Err(e) => bark3_wgpu::browser::log(&format!("[wasm] warmup failed: {e:#}")),
             }
         }
-        let inner = inner;
         let out = BarkAsr { inner };
         bark3_wgpu::browser::log("[wasm] create: returning");
         Ok(out)

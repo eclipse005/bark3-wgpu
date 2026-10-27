@@ -481,7 +481,73 @@ unsafe fn tile(
         unsafe { tile_avx2(a, lda, w, n0, ncols, c, ldc, rows, k0, k1) };
         return;
     }
-    unsafe { tile_scalar(a, lda, w, n0, ncols, c, ldc, rows, k0, k1) };
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        // SAFETY: the build target enables simd128, so the kernel exists.
+        unsafe { tile_simd128(a, lda, w, n0, ncols, c, ldc, rows, k0, k1) };
+        return;
+    }
+    #[allow(unreachable_code)]
+    unsafe {
+        tile_scalar(a, lda, w, n0, ncols, c, ldc, rows, k0, k1)
+    };
+}
+
+/// wasm SIMD128 twin of tile_scalar: four columns per vector, sixteen per
+/// panel, one multiply and one add per lane — deliberately *not* fused, so the
+/// result stays bit-identical to the scalar kernel it replaces (a fused
+/// multiply would round once instead of twice).
+///
+/// # Safety
+/// Same contract as tile().
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[target_feature(enable = "simd128")]
+unsafe fn tile_simd128(
+    a: *const f32,
+    lda: usize,
+    w: &PackW,
+    n0: usize,
+    ncols: usize,
+    c: *mut f32,
+    ldc: usize,
+    rows: usize,
+    k0: usize,
+    k1: usize,
+) {
+    use core::arch::wasm32::*;
+
+    let k = w.k;
+    let first = n0 / PANEL;
+    let panels = ncols.div_ceil(PANEL);
+    let mut buf = [0f32; PANEL];
+    for row in 0..rows {
+        for p in 0..panels {
+            let cols = (ncols - p * PANEL).min(PANEL);
+            let wp = w.data.as_ptr().add((first + p) * k * PANEL);
+            let mut acc0 = f32x4_splat(0.0);
+            let mut acc1 = f32x4_splat(0.0);
+            let mut acc2 = f32x4_splat(0.0);
+            let mut acc3 = f32x4_splat(0.0);
+            for kk in k0..k1 {
+                let av = f32x4_splat(*a.add(row * lda + kk));
+                let base = wp.add(kk * PANEL);
+                let w0 = v128_load(base as *const v128);
+                let w1 = v128_load(base.add(4) as *const v128);
+                let w2 = v128_load(base.add(8) as *const v128);
+                let w3 = v128_load(base.add(12) as *const v128);
+                acc0 = f32x4_add(acc0, f32x4_mul(av, w0));
+                acc1 = f32x4_add(acc1, f32x4_mul(av, w1));
+                acc2 = f32x4_add(acc2, f32x4_mul(av, w2));
+                acc3 = f32x4_add(acc3, f32x4_mul(av, w3));
+            }
+            v128_store(buf.as_mut_ptr() as *mut v128, acc0);
+            v128_store(buf.as_mut_ptr().add(4) as *mut v128, acc1);
+            v128_store(buf.as_mut_ptr().add(8) as *mut v128, acc2);
+            v128_store(buf.as_mut_ptr().add(12) as *mut v128, acc3);
+            let dst = c.add(row * ldc + p * PANEL);
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, cols);
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -166,6 +166,19 @@ pub struct AsrInference {
 }
 
 impl AsrInference {
+    /// Destroy the GPU device: every buffer it owns is freed immediately.
+    ///
+    /// A browser keeps a dropped buffer's VRAM until its JavaScript wrapper is
+    /// collected, so a finished transcription held a few hundred megabytes of
+    /// activation buffers until the tab closed. Destroying the device is the one
+    /// WebGPU call that releases them on the spot; the instance cannot transcribe
+    /// afterwards and has to be created again.
+    pub fn release_gpu(&self) {
+        if let Some(state) = &self.gpu {
+            state.enc.gpu.device.destroy();
+        }
+    }
+
     /// Load weights from an official checkpoint directory and build `backend`.
     ///
     /// The directory may hold either layout the releases ship: a

@@ -139,6 +139,17 @@ impl BarkAsr {
             .map_err(|e| JsError::new(&format!("{e:#}")))
     }
 
+    /// Releases the GPU device — every buffer it owns goes back to the driver now.
+    ///
+    /// Call it when the page stops transcribing: WebGPU only returns a dropped
+    /// buffer once its JavaScript wrapper is collected, so without this the card
+    /// stays occupied until the tab closes. The instance cannot transcribe
+    /// afterwards; create a new one.
+    pub fn close(&self) {
+        self.inner.release_gpu();
+        bark3_wgpu::browser::log("[wasm] device destroyed");
+    }
+
     /// What was loaded: release name, weight layout, parameter count, architecture.
     #[wasm_bindgen(js_name = modelInfo)]
     pub fn model_info(&self) -> String {

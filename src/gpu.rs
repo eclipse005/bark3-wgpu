@@ -608,8 +608,16 @@ impl Gpu {
     pub fn scratch(&self, label: &'static str, bytes: u64) -> wgpu::Buffer {
         let size = ((bytes + 15) & !15).max(16);
         let mut pool = self.scratch.lock().expect("scratch pool");
-        if let Some(buf) = pool.get(&(label, size)) {
-            return buf.clone();
+        // High-water reuse: a chunk's span varies by a second or two and the
+        // buffer is sized from it, so an exact-size match would reallocate nearly
+        // every chunk. Chrome then carves a fresh device allocation per size and
+        // keeps the old ones in its free list: the pool total stayed at 0.5 GB
+        // while the card climbed past 5 GB. Keeping the largest buffer per label
+        // turns that into a one-time allocation.
+        if let Some(((_, have), buf)) = pool.iter().find(|((l, _), _)| *l == label) {
+            if *have >= size {
+                return buf.clone();
+            }
         }
         pool.retain(|(l, _), _| *l != label);
         let buf = self.storage(label, size);

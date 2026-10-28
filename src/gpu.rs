@@ -614,6 +614,16 @@ impl Gpu {
         pool.retain(|(l, _), _| *l != label);
         let buf = self.storage(label, size);
         pool.insert((label, size), buf.clone());
+        // A chunk's activations are tens of MB; anything near a gigabyte means a
+        // span slipped through the VAD limit, which is worth seeing in the console.
+        if size >= (64 << 20) {
+            let total: u64 = pool.iter().map(|((_, s), _)| *s).sum();
+            crate::browser::log(&format!(
+                "[pool] {label} {} MB (pool total {} MB)",
+                size >> 20,
+                total >> 20
+            ));
+        }
         buf
     }
     /// Total GPU buffer bytes allocated so far — see [`ALLOC_BYTES`].

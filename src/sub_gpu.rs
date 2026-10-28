@@ -593,18 +593,18 @@ impl SubGpu {
 
         let prof = std::env::var("BARK3_SUBG_TIME").is_ok();
         let ta = crate::clock::now();
-        let mel_b = g.storage("sub_mel", (mel.len() * 4) as u64);
+        let mel_b = g.scratch("sub_mel", (mel.len() * 4) as u64);
         g.upload(&mel_b, bytemuck::cast_slice(mel));
 
-        let x1 = g.storage("sub_x1", (256 * f1 * m1 * 4) as u64);
+        let x1 = g.scratch("sub_x1", (256 * f1 * m1 * 4) as u64);
         let p1 = t1 * m2;
-        let x2 = g.storage("sub_x2", (256 * p1 * 4) as u64);
-        let x3 = g.storage("sub_x3", (256 * p1 * 4) as u64);
+        let x2 = g.scratch("sub_x2", (256 * p1 * 4) as u64);
+        let x3 = g.scratch("sub_x3", (256 * p1 * 4) as u64);
         let p2 = (t2 * m3).div_ceil(64) * 64;
-        let x4 = g.storage("sub_x4", (256 * p2 * 4) as u64);
-        let x5 = g.storage("sub_x5", (256 * p2 * 4) as u64);
+        let x4 = g.scratch("sub_x4", (256 * p2 * 4) as u64);
+        let x5 = g.scratch("sub_x5", (256 * p2 * 4) as u64);
         let tp = crate::encoder::pad128(t_real);
-        let out = g.storage("sub_out", (tp * 4096 * 4) as u64);
+        let out = g.scratch("sub_out", (tp * 4096 * 4) as u64);
         let t_alloc = ta.elapsed();
         if prof {
             let e0 = g.device.create_command_encoder(&Default::default());
@@ -617,7 +617,7 @@ impl SubGpu {
         }
         let ta2 = crate::clock::now();
         let p_conv = f1 * m1;
-        let patch = g.storage("sub_patch", (16 * p_conv * 4) as u64);
+        let patch = g.scratch("sub_patch", (16 * p_conv * 4) as u64);
         let mut enc = g.device.create_command_encoder(&Default::default());
         let t0 = crate::clock::now();
         self.im2col_dispatch(g, &mut enc, &mel_b, &patch, f, f1, m1, p_conv);

@@ -15,6 +15,8 @@ pub struct Gpu {
     pub info: wgpu::AdapterInfo,
     pub limits: wgpu::Limits,
     pub features: wgpu::Features,
+    /// Scratch buffers reused across calls — see Gpu::scratch.
+    scratch: std::sync::Mutex<std::collections::HashMap<(&'static str, u64), wgpu::Buffer>>,
 }
 
 /// Which device to run on.
@@ -558,6 +560,7 @@ impl Gpu {
             info,
             limits,
             features,
+            scratch: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -589,6 +592,30 @@ impl Gpu {
         })
     }
 
+    /// One scratch buffer per label, reused across calls.
+    ///
+    /// A 60 s chunk allocates about twenty activation buffers (~160 MB). Creating
+    /// and dropping those every chunk is cheap on a native driver but not in a
+    /// browser: the old buffer only goes back to the driver once the GPU work that
+    /// used it has finished *and* the JavaScript object has been collected, so a
+    /// long recording walks VRAM up instead of staying flat — on an 8 GB card a
+    /// 63 min file reached the limit.
+    ///
+    /// Reusing by label keeps the steady state at one chunk's worth. A different
+    /// size for the same label replaces the entry, so a run whose chunks grow does
+    /// not accumulate one buffer per size. A reused buffer still holds the previous
+    /// call's contents: every caller must write the whole range it reads.
+    pub fn scratch(&self, label: &'static str, bytes: u64) -> wgpu::Buffer {
+        let size = ((bytes + 15) & !15).max(16);
+        let mut pool = self.scratch.lock().expect("scratch pool");
+        if let Some(buf) = pool.get(&(label, size)) {
+            return buf.clone();
+        }
+        pool.retain(|(l, _), _| *l != label);
+        let buf = self.storage(label, size);
+        pool.insert((label, size), buf.clone());
+        buf
+    }
     /// Total GPU buffer bytes allocated so far — see [`ALLOC_BYTES`].
     pub fn allocated_bytes(&self) -> u64 {
         ALLOC_BYTES.load(Ordering::Relaxed)

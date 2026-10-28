@@ -1993,7 +1993,7 @@ impl Encoder {
         for (i, v) in sub_rows.iter().enumerate() {
             sub_pad[i] = *v;
         }
-        let sub = self.gpu.storage("a_sub", (tp * 4096 * 4) as u64);
+        let sub = self.gpu.scratch("a_sub", (tp * 4096 * 4) as u64);
         self.gpu
             .queue
             .write_buffer(&sub, 0, bytemuck::cast_slice(&sub_pad));
@@ -2024,7 +2024,8 @@ impl Encoder {
         pos_pad[..pos.len()].copy_from_slice(&pos);
 
         let g = &self.gpu;
-        let mk = |label: &str, words: u64| g.storage(label, words * 4);
+        // Reused across chunks instead of re-created: see Gpu::scratch.
+        let mk = |label: &'static str, words: u64| g.scratch(label, words * 4);
         let h = mk("a_h", tp as u64 * 1024);
         let h2 = mk("a_h2", tp as u64 * 1024);
         let tmp = mk("a_tmp", tp as u64 * 1024);
